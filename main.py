@@ -84,26 +84,34 @@ def is_admin():
     return commands.check(predicate)
 
 # ==========================================
-# 📡 API FUNCTIONS (DEBUG MODE ADDED)
+# 📡 API FUNCTIONS (FIXED PARSING)
 # ==========================================
 def get_numeric_id(username):
     url = f"https://{RAPID_HOST}/user"
     querystring = {"username": username}
     headers = {"x-rapidapi-key": RAPID_API_KEY, "x-rapidapi-host": RAPID_HOST}
     
-    print(f"🔍 DEBUG: Looking up ID for {username}...") # Log start
+    print(f"🔍 DEBUG: Looking up ID for {username}...") 
     
     try:
         response = requests.get(url, headers=headers, params=querystring)
         data = response.json()
         
-        # PRINT THE RAW DATA TO LOGS SO WE CAN SEE ERRORS
-        print(f"🔍 DEBUG API RESPONSE: {data}")
-
-        if 'result' in data and 'rest_id' in data['result']:
-            return data['result']['rest_id']
+        # 🟢 THE FIX IS HERE: Reading the exact structure from your logs
+        # Structure: {'result': {'data': {'user': {'result': {'rest_id': ... }}}}}
+        
+        result_block = data.get('result', {})
+        
+        # Path 1 (From your logs)
+        if 'data' in result_block and 'user' in result_block['data']:
+            user_result = result_block['data']['user'].get('result', {})
+            return user_result.get('rest_id')
+            
+        # Path 2 (Alternative structure sometimes used)
         elif 'data' in data and 'user' in data['data']:
              return data['data']['user']['result']['rest_id']
+             
+        # Path 3 (Simple structure)
         elif 'id' in data:
             return data['id']
             
@@ -122,7 +130,12 @@ def check_replies(user_numeric_id, target_tweet_ids):
         data = response.json()
         entries = []
         
-        # Basic parsing attempt
+        # Parsing attempt for replies
+        if 'result' in data and 'timeline' in data['result']:
+             # Sometimes it's nested in result -> timeline
+             pass # Logic varies heavily here, usually 'instructions' list
+             
+        # Standard V2 check
         if 'content' in data and 'items' in data['content']:
             entries = data['content']['items']
         elif 'data' in data:
@@ -142,7 +155,6 @@ def check_replies(user_numeric_id, target_tweet_ids):
 @tasks.loop(minutes=1)
 async def raid_scheduler():
     if not SETTINGS["channel_id"]: return
-    # FIXED DEPRECATION WARNING BELOW:
     now = datetime.now(timezone.utc).time()
     
     for start_time in OPEN_TIMES:
@@ -256,10 +268,9 @@ async def start(ctx):
 @bot.command()
 @is_admin()
 async def config(ctx):
-    """Check current settings."""
     ch = f"<#{SETTINGS['channel_id']}>" if SETTINGS['channel_id'] else "Not Set"
     rl = f"<@&{SETTINGS['admin_role_id']}>" if SETTINGS['admin_role_id'] else "Not Set"
-    await ctx.send(f"⚙️ **Current Config:**\nRaid Channel: {ch}\nAdmin Role: {rl}\nSuper Admin: <@{SUPER_ADMIN_ID}>")
+    await ctx.send(f"⚙️ **Config:**\nChannel: {ch}\nRole: {rl}\nSuper Admin: <@{SUPER_ADMIN_ID}>")
 
 # ==========================================
 # 👤 USER COMMANDS
@@ -269,7 +280,6 @@ async def register(ctx, handle):
     clean_handle = handle.replace("@", "").strip()
     msg = await ctx.reply(f"🔄 Linking @{clean_handle}...")
     
-    # Debugging print
     print(f"📝 User {ctx.author.name} requesting register for {clean_handle}")
     
     nid = get_numeric_id(clean_handle)
