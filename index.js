@@ -1,5 +1,15 @@
 require('dotenv').config();
-const { Client, GatewayIntentBits, EmbedBuilder, Partials } = require('discord.js');
+// 1. IMPORT BUTTON TOOLS
+const { 
+    Client, 
+    GatewayIntentBits, 
+    EmbedBuilder, 
+    Partials, 
+    ActionRowBuilder, 
+    ButtonBuilder, 
+    ButtonStyle,
+    ComponentType 
+} = require('discord.js');
 const axios = require('axios');
 const Database = require('better-sqlite3');
 const cron = require('node-cron');
@@ -9,22 +19,19 @@ const path = require('path');
 // ==========================================
 // ⚙️ CONFIGURATION
 // ==========================================
-// Paste your Token & Key here or use Railway Variables
 const TOKEN = process.env.DISCORD_TOKEN; 
 const RAPID_API_KEY = process.env.RAPID_API_KEY || "5b4b9109camsh07781293c710eeap18bc01jsn25a0b784c6ec";
 const RAPID_HOST = "twitter241.p.rapidapi.com";
-const SUPER_ADMIN_ID = "1442310589362999428"; // You
-const VERSION = "v6.0 (JS/SQLite)";
+const SUPER_ADMIN_ID = "1442310589362999428"; 
+const VERSION = "v8.0 (Permanent Registration)";
 
-// 📂 DATABASE SETUP (Persistent Volume)
-// We check if /dataaa exists (Railway Volume), otherwise use local folder
+// 📂 DATABASE SETUP
 const DATA_DIR = fs.existsSync('/dataaa') ? '/dataaa' : './data';
 if (!fs.existsSync(DATA_DIR)) fs.mkdirSync(DATA_DIR, { recursive: true });
 
 const dbPath = path.join(DATA_DIR, 'raid.db');
 const db = new Database(dbPath);
 
-// Initialize Tables
 db.exec(`
   CREATE TABLE IF NOT EXISTS users (
     discord_id TEXT PRIMARY KEY,
@@ -51,8 +58,7 @@ const client = new Client({
     partials: [Partials.Message, Partials.Channel, Partials.Reaction]
 });
 
-// Runtime Memory (Cleared on Restart, but Users are Safe in DB)
-let sessionTweets = new Map(); // TweetID -> UserID
+let sessionTweets = new Map();
 
 // ==========================================
 // 💾 DATABASE HELPERS
@@ -76,9 +82,8 @@ function setSetting(key, value) {
 }
 
 // ==========================================
-// 📡 API ENGINE (NUCLEAR SEARCH)
+// 📡 API ENGINE
 // ==========================================
-// This finds a key (like 'rest_id' or 'in_reply_to_status_id') anywhere in the JSON
 function findValuesByKey(obj, key, list = []) {
     if (!obj) return list;
     if (Array.isArray(obj)) {
@@ -92,42 +97,29 @@ function findValuesByKey(obj, key, list = []) {
     return list;
 }
 
-// 1. GET USER ID (Using your Axios snippet)
 async function getNumericId(username) {
     console.log(`🔍 Lookup ID for ${username}...`);
     const options = {
         method: 'GET',
         url: `https://${RAPID_HOST}/user`,
         params: { username: username },
-        headers: {
-            'x-rapidapi-key': RAPID_API_KEY,
-            'x-rapidapi-host': RAPID_HOST
-        }
+        headers: { 'x-rapidapi-key': RAPID_API_KEY, 'x-rapidapi-host': RAPID_HOST }
     };
 
     try {
         const response = await axios.request(options);
-        
-        // Priority 1: rest_id
         let ids = findValuesByKey(response.data, 'rest_id');
         if (ids.length > 0) return ids[0];
-
-        // Priority 2: id (Fallback)
         ids = findValuesByKey(response.data, 'id');
-        for (let id of ids) {
-            if (!isNaN(id) && id.length > 5) return id;
-        }
+        for (let id of ids) { if (!isNaN(id) && id.length > 5) return id; }
     } catch (e) {
         console.error(`❌ API Error (ID): ${e.message}`);
     }
     return null;
 }
 
-// 2. CHECK REPLIES (Using your Axios snippet + Dynamic Count)
 async function checkReplies(userNumericId, targetTweetIds) {
     if (!userNumericId) return 0;
-
-    // Dynamic Count: Participants + 20 Buffer
     let fetchCount = targetTweetIds.length + 20;
     if (fetchCount < 20) fetchCount = 20;
     if (fetchCount > 100) fetchCount = 100;
@@ -135,37 +127,21 @@ async function checkReplies(userNumericId, targetTweetIds) {
     const options = {
         method: 'GET',
         url: `https://${RAPID_HOST}/user-replies-v2`,
-        params: {
-            user: userNumericId,
-            count: String(fetchCount)
-        },
-        headers: {
-            'x-rapidapi-key': RAPID_API_KEY,
-            'x-rapidapi-host': RAPID_HOST
-        }
+        params: { user: userNumericId, count: String(fetchCount) },
+        headers: { 'x-rapidapi-key': RAPID_API_KEY, 'x-rapidapi-host': RAPID_HOST }
     };
 
     try {
         const response = await axios.request(options);
-
-        // NUCLEAR SEARCH: Find ALL reply IDs in the response
         const foundIds = new Set();
-        
-        // Collect 'in_reply_to_status_id_str'
-        const strIds = findValuesByKey(response.data, 'in_reply_to_status_id_str');
-        strIds.forEach(id => foundIds.add(String(id)));
-        
-        // Collect 'in_reply_to_status_id' (Backup)
-        const numIds = findValuesByKey(response.data, 'in_reply_to_status_id');
-        numIds.forEach(id => foundIds.add(String(id)));
+        findValuesByKey(response.data, 'in_reply_to_status_id_str', Array.from(foundIds)).forEach(id => foundIds.add(String(id)));
+        findValuesByKey(response.data, 'in_reply_to_status_id', Array.from(foundIds)).forEach(id => foundIds.add(String(id)));
 
-        // Compare matches
         let matches = 0;
         for (let target of targetTweetIds) {
             if (foundIds.has(target)) matches++;
         }
         return matches;
-
     } catch (e) {
         console.error(`❌ API Error (Replies): ${e.message}`);
         return 0;
@@ -183,12 +159,11 @@ async function openSession() {
     const channel = await client.channels.fetch(channelId).catch(() => null);
     if (!channel) return;
 
-    // Unlock Channel
     await channel.permissionOverwrites.edit(channel.guild.roles.everyone, { SendMessages: true });
 
     const embed = new EmbedBuilder()
         .setTitle("🟢 RAID SESSION OPEN")
-        .setDescription("Post your links! Reply to everyone!\nType `!register @username` if you are new.")
+        .setDescription("Post your link (Only 1 per person)!\nReply to everyone else!\n**Unregistered users cannot post.**")
         .setColor(0x00FF00);
 
     await channel.send({ embeds: [embed] });
@@ -200,13 +175,10 @@ async function closeAndReport() {
     const channel = await client.channels.fetch(channelId).catch(() => null);
     if (!channel) return;
 
-    // Lock Channel
     await channel.permissionOverwrites.edit(channel.guild.roles.everyone, { SendMessages: false });
 
     const targets = Array.from(sessionTweets.keys());
-    if (targets.length === 0) {
-        return channel.send("🔴 Session ended. No links posted.");
-    }
+    if (targets.length === 0) return channel.send("🔴 Session ended. No links posted.");
 
     let checkCount = targets.length + 20;
     if(checkCount > 100) checkCount = 100;
@@ -221,44 +193,24 @@ async function closeAndReport() {
         let score = 0;
         let handle = user ? user.handle : "Unknown";
 
-        // Logic: Retry ID lookup if missing or if handle exists but no ID
-        if (!user || !user.numeric_id) {
-            if (user && user.handle) {
-                const nid = await getNumericId(user.handle);
-                if (nid) {
-                    saveUser(userId, user.handle, nid);
-                    user = getUser(userId); // Refresh
-                }
-            }
-        }
-
-        // If we have an ID, check score
         if (user && user.numeric_id) {
             score = await checkReplies(user.numeric_id, targets);
-            // Cap score at max targets (sanity check)
             if (score > targets.length) score = targets.length;
         }
-
         results.push({ id: userId, handle, score });
     }
 
-    // Sort High to Low
     results.sort((a, b) => b.score - a.score);
 
-    // Generate Report
     const dateStr = new Date().toISOString().split('T')[0];
-    
-    // Header
-    let report = `═══════════════════════════════════════\n📊 ELITE YAPPERS REPORT — ${dateStr}\n═══════════════════════════════════════\n\n📈 STATISTIK\n▸ Total tweet dicek: ${targets.length}\n▸ Total pengirim: ${results.length}\n▸ Self-reply: tidak diwajibkan\n\n🔍 STATUS REPLIES\n✅ Sudah full reply:`;
+    let report = `═══════════════════════════════════════\n📊 ELITE RAID REPORT — ${dateStr}\n═══════════════════════════════════════\n\n📈 STATISTICS\n▸ Total Tweets: ${targets.length}\n▸ Participants: ${results.length}\n▸ Self-reply: Not Required\n\n🔍 STATUS\n✅ 100% Completed:`;
 
-    let req = targets.length - 1; // You don't reply to yourself
+    let req = targets.length - 1;
     if (req < 1) req = 1;
 
     for (let p of results) {
         let pct = Math.floor((p.score / req) * 100);
         if (pct > 100) pct = 100;
-        
-        // Add emoji for full score
         const prefix = pct >= 100 ? "  ▸" : "  ⚠️";
         report += `\n${prefix} <@${p.id}> — ${p.score}/${req} (${pct}%)`;
     }
@@ -271,30 +223,47 @@ async function closeAndReport() {
 
     await channel.send({ embeds: [embed] });
     
-    // Chunking for Discord limit (2000 chars)
     if (report.length > 1900) {
         const chunks = report.match(/[\s\S]{1,1900}/g) || [];
-        for (const chunk of chunks) {
-            await channel.send(chunk);
-        }
+        for (const chunk of chunks) await channel.send(chunk);
     } else {
         await channel.send(report);
     }
 }
 
 // ==========================================
-// 🛠️ COMMANDS
+// 🛠️ COMMANDS & LOGIC
 // ==========================================
 client.on('messageCreate', async message => {
     if (message.author.bot) return;
 
-    // 1. Link Collector (Passive)
+    // 1. LINK COLLECTOR
     const channelId = getSetting('channel_id');
     if (channelId && message.channel.id === channelId) {
         const match = message.content.match(/status\/(\d+)/);
         if (match) {
+            const user = getUser(message.author.id);
+            if (!user) {
+                try {
+                    await message.delete();
+                    const warning = await message.channel.send(`<@${message.author.id}> ⚠️ **Unregistered!** Type \`!register @username\` in another channel.`);
+                    setTimeout(() => warning.delete().catch(() => {}), 5000);
+                } catch (e) {}
+                return;
+            }
+
+            const currentParticipants = Array.from(sessionTweets.values());
+            if (currentParticipants.includes(message.author.id)) {
+                try {
+                    await message.delete();
+                    const warning = await message.channel.send(`<@${message.author.id}> ⚠️ **One link per session!**`);
+                    setTimeout(() => warning.delete().catch(() => {}), 5000);
+                } catch (e) {}
+                return;
+            }
+
             sessionTweets.set(match[1], message.author.id);
-            await message.react('👀');
+            await message.react('✅');
         }
     }
 
@@ -303,35 +272,80 @@ client.on('messageCreate', async message => {
     const args = message.content.slice(1).trim().split(/ +/);
     const command = args.shift().toLowerCase();
 
-    // REGISTER
+    // ==================================================
+    // 🔐 REGISTER (WITH CONFIRMATION)
+    // ==================================================
     if (command === 'register') {
+        // 1. Check PERMANENT Lock
+        const existing = getUser(message.author.id);
+        if (existing) {
+            return message.reply(`❌ **You are already registered** as \`@${existing.handle}\`.\nThis **cannot** be changed.`);
+        }
+
         if (!args[0]) return message.reply("Usage: `!register @username`");
         const handle = args[0].replace('@', '').trim();
-        const msg = await message.reply(`🔄 Linking @${handle}...`);
-
+        
+        // 2. Lookup first
+        const initMsg = await message.reply(`🔍 verifying @${handle}...`);
         const nid = await getNumericId(handle);
-        saveUser(message.author.id, handle, nid || null);
 
-        if (nid) await msg.edit(`✅ Registered @${handle} (ID: ${nid})`);
-        else await msg.edit(`⚠️ Registered @${handle} (ID lookup failed - will retry during raid)`);
+        if (!nid) {
+            return initMsg.edit(`❌ Could not find user **@${handle}** on Twitter/X.\nPlease check spelling and try again.`);
+        }
+
+        // 3. Ask for Confirmation (Buttons)
+        const row = new ActionRowBuilder()
+            .addComponents(
+                new ButtonBuilder()
+                    .setCustomId('confirm_reg')
+                    .setLabel('Confirm')
+                    .setStyle(ButtonStyle.Success),
+                new ButtonBuilder()
+                    .setCustomId('cancel_reg')
+                    .setLabel('Cancel')
+                    .setStyle(ButtonStyle.Danger),
+            );
+
+        const confirmMsg = await initMsg.edit({
+            content: `⚠️ **CONFIRM REGISTRATION**\n\nDiscord: <@${message.author.id}>\nX Handle: **@${handle}** (ID: ${nid})\n\n**Once you click Confirm, you CANNOT change this.**`,
+            components: [row]
+        });
+
+        // 4. Handle Button Click
+        const collector = confirmMsg.createMessageComponentCollector({ componentType: ComponentType.Button, time: 30000 });
+
+        collector.on('collect', async i => {
+            if (i.user.id !== message.author.id) {
+                return i.reply({ content: 'This is not for you.', ephemeral: true });
+            }
+
+            if (i.customId === 'confirm_reg') {
+                saveUser(message.author.id, handle, nid);
+                await i.update({ content: `✅ **Successfully Registered!**\nYou are permanently linked to **@${handle}**.`, components: [] });
+            } else {
+                await i.update({ content: `🚫 Registration Cancelled.`, components: [] });
+            }
+        });
+
+        collector.on('end', collected => {
+            if (collected.size === 0) {
+                confirmMsg.edit({ content: '⏳ Registration timed out.', components: [] }).catch(() => {});
+            }
+        });
     }
 
-    // VERSION
-    if (command === 'version') {
-        return message.reply(`🤖 Bot Version: **${VERSION}**`);
-    }
+    // ==================================================
+    // 🛠️ OTHER COMMANDS
+    // ==================================================
+    if (command === 'version') return message.reply(`🤖 Bot Version: **${VERSION}**`);
 
-    // DIAGNOSE
     if (command === 'diagnose') {
         if (!args[0]) return message.reply("Usage: `!diagnose @username`");
         const handle = args[0].replace('@', '');
         await message.reply(`🕵️ Running Diagnosis for @${handle}...`);
-
         const nid = await getNumericId(handle);
         if (!nid) return message.channel.send("❌ ID Lookup Failed.");
-
         message.channel.send(`✅ Found ID: \`${nid}\`. Checking replies...`);
-        
         try {
             const options = {
                 method: 'GET',
@@ -340,18 +354,13 @@ client.on('messageCreate', async message => {
                 headers: { 'x-rapidapi-key': RAPID_API_KEY, 'x-rapidapi-host': RAPID_HOST }
             };
             const response = await axios.request(options);
-            
             const ids = new Set();
             findValuesByKey(response.data, 'in_reply_to_status_id_str', Array.from(ids)).forEach(id => ids.add(String(id)));
-            
             if (ids.size === 0) message.channel.send("⚠️ API returned valid JSON but NO replies found.");
-            else message.channel.send(`✅ API Healthy. Found ${ids.size} replies in last 20 tweets.\nSample IDs: ${Array.from(ids).slice(0, 3).join(', ')}`);
-        } catch (e) {
-            message.channel.send(`❌ API Error: ${e.message}`);
-        }
+            else message.channel.send(`✅ API Healthy. Found ${ids.size} replies.`);
+        } catch (e) { message.channel.send(`❌ API Error: ${e.message}`); }
     }
 
-    // ADMIN COMMANDS
     let isAdmin = message.author.id === SUPER_ADMIN_ID;
     if (!isAdmin) {
         const roleId = getSetting('admin_role_id');
@@ -360,47 +369,35 @@ client.on('messageCreate', async message => {
     }
 
     if (!isAdmin) return;
-
     if (command === 'setchannel') {
         const channel = message.mentions.channels.first();
         if (!channel) return message.reply("Tag a channel.");
         setSetting('channel_id', channel.id);
         message.reply(`✅ Channel set to ${channel}`);
     }
-
     if (command === 'setrole') {
         const role = message.mentions.roles.first();
         if (!role) return message.reply("Tag a role.");
         setSetting('admin_role_id', role.id);
         message.reply(`✅ Admin role set to ${role.name}`);
     }
-
     if (command === 'start' || command === 'forceraid') {
         message.reply("🚀 Force starting session...");
         openSession();
     }
-
     if (command === 'end' || command === 'forceclose') {
         message.reply("🛑 Ending session...");
         closeAndReport();
     }
 });
 
-// ==========================================
-// ⏰ SCHEDULER (Cron)
-// ==========================================
 client.once('ready', () => {
     console.log(`Logged in as ${client.user.tag} - ${VERSION}`);
-    
-    // Times: 8:00, 14:00, 21:00 UTC
     const times = ["0 8 * * *", "0 14 * * *", "0 21 * * *"];
-    
     times.forEach(t => {
         cron.schedule(t, () => {
             console.log("⏰ Auto-Starting Session");
             openSession();
-            
-            // Schedule Close 60 mins later
             setTimeout(() => {
                 console.log("⏰ Auto-Closing Session");
                 closeAndReport();
