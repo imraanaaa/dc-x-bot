@@ -1,0 +1,19 @@
+{
+  "name": "raid-bot-v6",
+  "version": "6.0.0",
+  "description": "Elite Raid Checker JS",
+  "main": "index.js",
+  "scripts": {
+    "start": "node index.js"
+  },
+  "dependencies": {
+    "discord.js": "^14.14.1",
+    "axios": "^1.6.7",
+    "better-sqlite3": "^9.4.3",
+    "dotenv": "^16.4.5",
+    "node-cron": "^3.0.3"
+  },
+  "engines": {
+    "node": "18.x"
+  }
+}
