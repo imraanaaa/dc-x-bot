@@ -2,7 +2,6 @@ require('dotenv').config();
 const { 
     Client, 
     GatewayIntentBits, 
-    EmbedBuilder, 
     Partials, 
     ActionRowBuilder, 
     ButtonBuilder, 
@@ -10,7 +9,7 @@ const {
     ComponentType,
     StringSelectMenuBuilder,
     StringSelectMenuOptionBuilder
-} = require('discord.js');
+} = require('discord.js'); // Removed EmbedBuilder
 const axios = require('axios');
 const Database = require('better-sqlite3');
 const cron = require('node-cron');
@@ -24,17 +23,17 @@ const TOKEN = process.env.DISCORD_TOKEN;
 const RAPID_API_KEY = process.env.RAPID_API_KEY; 
 const RAPID_HOST = "twitter241.p.rapidapi.com";
 
-// 👑 ADMIN LIST (Strict Access)
+// 👑 ADMIN LIST
 const SUPER_ADMINS = [
     "1442310589362999428", // Admin 1
     "1442618881285034099", // Admin 2
     "627327810079424533"   // Admin 3
 ];
 
-// 🔔 ROLE TO TAG (1 min before)
+// 🔔 ROLE TO TAG
 const RAID_ROLE_ID = "1455184518104485950";
 
-const VERSION = "v15.0 (Ultimate Blue)";
+const VERSION = "v17.0 (OG Yappers Text Mode)";
 
 // 📂 DATABASE SETUP
 const DATA_DIR = fs.existsSync('/dataaa') ? '/dataaa' : './data';
@@ -177,160 +176,151 @@ async function checkReplies(userNumericId, targetTweetIds) {
 }
 
 // ==========================================
-// 📅 SESSION MANAGERS
+// 📅 SESSION MANAGERS (TEXT MODE)
 // ==========================================
 async function sendWarning() {
     const channelId = getSetting('channel_id');
     if (!channelId) return;
     const channel = await client.channels.fetch(channelId).catch(() => null);
     if (!channel) return;
-
-    await channel.send(`🚨 <@&${RAID_ROLE_ID}> **WAKE UP!**\nSession starts in **1 minute**! Get your links ready! ⚡`);
+    await channel.send(`🚨 <@&${RAID_ROLE_ID}> **WAKE UP!**\n│\n└─ ⏳ Session starts in **1 minute**! Get ready.`);
 }
 
+// 1. OPEN SESSION
 async function openSession(triggerMsg = null) {
-    clearSession();
+    clearSession(); 
     const channelId = getSetting('channel_id');
-    if (!channelId) {
-        if (triggerMsg) triggerMsg.reply("❌ **No Channel Set.**");
-        return;
-    }
+    if (!channelId) return triggerMsg?.reply("❌ No Channel Set.");
     const channel = await client.channels.fetch(channelId).catch(() => null);
-    if (!channel) return;
+    if (!channel) return triggerMsg?.reply("❌ Channel Not Found.");
 
     try {
         await channel.permissionOverwrites.edit(channel.guild.roles.everyone, { SendMessages: true });
     } catch (e) {
-        if (triggerMsg) triggerMsg.reply("❌ **Permission Error:** Cannot unlock channel.");
+        if (triggerMsg) triggerMsg.reply("❌ Permission Error: Cannot unlock.");
         return;
     }
 
-    const embed = new EmbedBuilder()
-        .setTitle("💎 RAID SESSION STARTED")
-        .setDescription("⚡ **ENGAGEMENT PROTOCOL ACTIVE**\n\n1️⃣ Post your link (1 per person).\n2️⃣ Reply to everyone else.\n3️⃣ Only registered accounts allowed.")
-        .setColor(0x00FFFF) // Cyan Blue
-        .setImage("https://media1.tenor.com/m/X_3C6mCjUukAAAAC/twitter-x.gif"); // Optional X gif
+    const msg = `
+🟢 **YAPPING SESSION STARTED**
+│
+├── 💎 **Status:** OPEN
+│
+├── 📝 **INSTRUCTIONS:**
+│   1. Drop your link (1 per person)
+│   2. Reply to every other link
+│   3. Don't be late
+│
+└── <@&${RAID_ROLE_ID}> **START ENGAGING!**
+    `;
 
-    await channel.send({ content: `<@&${RAID_ROLE_ID}>`, embeds: [embed] });
+    await channel.send(msg);
 }
 
-// Helper to calculate next session timestamp
-function getNextSessionTimestamp() {
-    const now = new Date();
-    const currentHour = now.getUTCHours();
-    const h1 = parseInt(getSetting('session1_hour') || "8");
-    const h2 = parseInt(getSetting('session2_hour') || "14");
-    const h3 = parseInt(getSetting('session3_hour') || "21");
-    
-    let hours = [h1, h2, h3].sort((a,b) => a-b);
-    let nextHour = hours.find(h => h > currentHour);
-    
-    // If no session later today, pick first session tomorrow
-    let targetDate = new Date(now);
-    if (nextHour === undefined) {
-        nextHour = hours[0];
-        targetDate.setDate(targetDate.getDate() + 1);
-    }
-    
-    targetDate.setUTCHours(nextHour, 0, 0, 0);
-    return Math.floor(targetDate.getTime() / 1000);
-}
-
-async function closeAndReport(triggerMsg = null) {
+// 2. CLOSE SESSION (Grace Period)
+async function closeSessionOnly(triggerMsg = null) {
     const channelId = getSetting('channel_id');
     if (!channelId) return triggerMsg?.reply("❌ No Channel.");
     const channel = await client.channels.fetch(channelId).catch(() => null);
     if (!channel) return triggerMsg?.reply("❌ Channel Not Found.");
 
-    // 1. LOCK CHANNEL
     try {
         await channel.permissionOverwrites.edit(channel.guild.roles.everyone, { SendMessages: false });
     } catch (e) {
-        if (triggerMsg) triggerMsg.reply("❌ Lock Error.");
+        if (triggerMsg) triggerMsg.reply("❌ Permission Error: Cannot lock.");
     }
 
     const sessionData = getSessionLinks();
-    const nextTime = getNextSessionTimestamp();
+    
+    // Calculate 2 hours from now
+    const reportTime = Math.floor((Date.now() / 1000) + (2 * 60 * 60));
 
-    // 2. SEND "GREAT WORK" + NEXT SESSION INFO
-    const closingEmbed = new EmbedBuilder()
-        .setTitle("🔒 SESSION LOCKED")
-        .setDescription(`**Great work, everyone!** 🚀\n\n📅 **Next Session:** <t:${nextTime}:R> (<t:${nextTime}:t>)`)
-        .setColor(0x00008B); // Dark Blue
+    const msg = `
+🔒 **CHANNEL LOCKED**
+│
+├── 📊 **Participants:** ${sessionData.length} Yappers
+├── ⏳ **Time Period:** 2 Hours
+│
+├── ⚠️ **ACTION REQUIRED:**
+│   Finish replying to everyone now.
+│   The bot is watching.
+│
+└── 📸 **Final Snapshot:** <t:${reportTime}:R>
+    `;
 
-    await channel.send({ embeds: [closingEmbed] });
+    await channel.send(msg);
+}
 
-    if (sessionData.length === 0) return channel.send("⚠️ **No links were posted this session.**");
+// 3. FINAL REPORT
+async function generateFinalReport(triggerMsg = null) {
+    const channelId = getSetting('channel_id');
+    if (!channelId) return triggerMsg?.reply("❌ No Channel.");
+    const channel = await client.channels.fetch(channelId).catch(() => null);
+    if (!channel) return triggerMsg?.reply("❌ Channel Not Found.");
 
-    // 3. SHOW PARTICIPANT COUNT
-    await channel.send(`📊 **Analyzing ${sessionData.length} participants...**\n*Report generating in 1 minute...* ⏳`);
+    const sessionData = getSessionLinks();
+    if (sessionData.length === 0) return channel.send("⚠️ **No links posted.**");
 
-    // 4. WAIT 1 MINUTE
-    setTimeout(async () => {
-        const targets = sessionData.map(r => r.tweet_id);
-        const results = [];
-        const uniqueUsers = new Set(sessionData.map(r => r.discord_id));
+    await channel.send(`⏳ **Analyzing ${sessionData.length} yappers...**`);
 
-        for (let userId of uniqueUsers) {
-            let user = getUser(userId);
-            let score = 0;
-            let handle = user ? user.handle : "Unknown";
+    const targets = sessionData.map(r => r.tweet_id);
+    const results = [];
+    const uniqueUsers = new Set(sessionData.map(r => r.discord_id));
 
-            if (user && user.numeric_id) {
-                score = await checkReplies(user.numeric_id, targets);
-                if (score > targets.length) score = targets.length;
-            }
-            results.push({ id: userId, handle, score });
+    for (let userId of uniqueUsers) {
+        let user = getUser(userId);
+        let score = 0;
+        let handle = user ? user.handle : "Unknown";
+
+        if (user && user.numeric_id) {
+            score = await checkReplies(user.numeric_id, targets);
+            if (score > targets.length) score = targets.length;
         }
+        results.push({ id: userId, handle, score });
+    }
 
-        results.sort((a, b) => b.score - a.score);
+    results.sort((a, b) => b.score - a.score);
 
-        // 5. GENERATE FANCY REPORT
-        const dateStr = new Date().toISOString().split('T')[0];
-        let req = targets.length - 1; 
-        if (req < 1) req = 1;
+    const dateStr = new Date().toISOString().split('T')[0];
+    let req = targets.length - 1; 
+    if (req < 1) req = 1;
 
-        let completedList = "";
-        let incompleteList = "";
-        let completeCount = 0;
+    let completedList = "";
+    let incompleteList = "";
+    let completeCount = 0;
 
-        for (let p of results) {
-            let pct = Math.floor((p.score / req) * 100);
-            if (pct > 100) pct = 100;
+    for (let p of results) {
+        let pct = Math.floor((p.score / req) * 100);
+        if (pct > 100) pct = 100;
 
-            if (pct >= 100) {
-                completeCount++;
-                completedList += `\n🔹 <@${p.id}> — **${p.score}/${req}**`;
-            } else {
-                const filled = Math.round((pct / 100) * 5);
-                const empty = 5 - filled;
-                const bar = "🟦".repeat(filled) + "⬛".repeat(empty);
-                incompleteList += `\n🔸 <@${p.id}> — **${p.score}/${req}** ${bar} (${pct}%)`;
-            }
+        if (pct >= 100) {
+            completeCount++;
+            completedList += `\n│ ✅ <@${p.id}>`;
+        } else {
+            const filled = Math.round((pct / 100) * 5);
+            const empty = 5 - filled;
+            const bar = "▓".repeat(filled) + "░".repeat(empty);
+            incompleteList += `\n│ ⚠️ <@${p.id}> [${bar}] ${p.score}/${req}`;
         }
+    }
 
-        let report = `
-━━━━━━━━━━━━━━━━━━━━━━━━━━
-💎 **ELITE RAID REPORT** — ${dateStr}
-━━━━━━━━━━━━━━━━━━━━━━━━━━
-
-🏆 **COMPLETED** (${completeCount})
-${completedList || "  *(None)*"}
-
-⚠️ **INCOMPLETE**
-${incompleteList || "  *(All Cleared!)*"}
-
-━━━━━━━━━━━━━━━━━━━━━━━━━━
+    let report = `
+📑 **OG REPORT** — ${dateStr}
+│
+├── 🏆 **COMPLETED (${completeCount})**${completedList || "\n│   (None)"}
+│
+├── 🚧 **INCOMPLETE**${incompleteList || "\n│   (All Cleared!)"}
+│
+└── 📉 **Total Links:** ${targets.length}
 `;
-        const reportEmbed = new EmbedBuilder()
-            .setTitle("📊 FINAL PERFORMANCE REPORT")
-            .setDescription(report)
-            .setColor(0x1E90FF) // Dodger Blue
-            .setFooter({ text: `Total Links: ${targets.length} | Checked in strict mode` })
-            .setTimestamp();
 
-        await channel.send({ embeds: [reportEmbed] });
-    }, 60000); // 60 Seconds Delay
+    // Handle Discord 2000 char limit
+    if (report.length > 1900) {
+        const chunks = report.match(/[\s\S]{1,1900}/g) || [];
+        for (const chunk of chunks) await channel.send(chunk);
+    } else {
+        await channel.send(report);
+    }
 }
 
 // ==========================================
@@ -345,29 +335,35 @@ function rescheduleCrons() {
     const h3 = getSetting('session3_hour') || "21";
 
     [h1, h2, h3].forEach(h => {
-        let hour = parseInt(h);
+        let startHour = parseInt(h);
         
-        // 1. Session Start (Hour H)
-        const startJob = cron.schedule(`0 ${hour} * * *`, () => {
-            console.log(`⏰ Starting Session (Hour: ${hour})`);
-            openSession();
-            // Auto close after 1 hour
-            setTimeout(() => {
-                console.log(`⏰ Closing Session (Hour: ${hour})`);
-                closeAndReport();
-            }, 60 * 60 * 1000);
-        });
-
-        // 2. Warning (Hour H-1 at Minute 59)
-        let warnHour = hour - 1;
-        if (warnHour < 0) warnHour = 23;
+        let warnH = startHour;
+        let warnM = 59;
+        if (startHour === 0) { warnH = 23; } else { warnH = startHour - 1; }
         
-        const warnJob = cron.schedule(`59 ${warnHour} * * *`, () => {
-            console.log(`⏰ Sending Warning (For Hour: ${hour})`);
+        const jobWarn = cron.schedule(`${warnM} ${warnH} * * *`, () => {
+            console.log(`⏰ Warning for Session ${startHour}`);
             sendWarning();
         });
 
-        activeCronJobs.push(startJob, warnJob);
+        const jobOpen = cron.schedule(`0 ${startHour} * * *`, () => {
+            console.log(`⏰ Opening Session ${startHour}`);
+            openSession();
+        });
+
+        let closeHour = (startHour + 1) % 24;
+        const jobClose = cron.schedule(`0 ${closeHour} * * *`, () => {
+            console.log(`⏰ Closing Session (Locking) ${startHour}`);
+            closeSessionOnly();
+        });
+
+        let reportHour = (startHour + 3) % 24;
+        const jobReport = cron.schedule(`0 ${reportHour} * * *`, () => {
+            console.log(`⏰ Generating Report for ${startHour}`);
+            generateFinalReport();
+        });
+
+        activeCronJobs.push(jobWarn, jobOpen, jobClose, jobReport);
     });
 }
 
@@ -377,13 +373,10 @@ function rescheduleCrons() {
 client.on('messageCreate', async message => {
     if (message.author.bot) return;
 
-    // 1. STRICT LINK COLLECTOR
     const channelId = getSetting('channel_id');
     if (channelId && message.channel.id === channelId) {
-        // Regex to capture Username (Group 1) and ID (Group 2)
-        // Supports: x.com/user/status/123 OR twitter.com/user/status/123
         const match = message.content.match(/(?:x|twitter)\.com\/([a-zA-Z0-9_]+)\/status\/(\d+)/);
-        const matchMobile = message.content.match(/(?:x|twitter)\.com\/i\/status\/(\d+)/); // For links without usernames
+        const matchMobile = message.content.match(/(?:x|twitter)\.com\/i\/status\/(\d+)/); 
 
         let tweetId = null;
         let detectedUser = null;
@@ -393,43 +386,34 @@ client.on('messageCreate', async message => {
             tweetId = match[2];
         } else if (matchMobile) {
             tweetId = match[1];
-            // Cannot validate username for /i/ links, so we pass it
         }
 
         if (tweetId) {
             const user = getUser(message.author.id);
-            
-            // A. Not Registered
             if (!user) {
                 try {
                     await message.delete();
-                    const w = await message.channel.send(`<@${message.author.id}> ⛔ **Unregistered.** Ask an Admin to add you.`);
+                    const w = await message.channel.send(`⛔ <@${message.author.id}> **Unregistered.**`);
                     setTimeout(() => w.delete().catch(() => {}), 5000);
                 } catch (e) {}
                 return;
             }
-
-            // B. Wrong Account (Identity Theft Check)
             if (detectedUser && user.handle.toLowerCase() !== detectedUser.toLowerCase()) {
                 try {
                     await message.delete();
-                    const w = await message.channel.send(`<@${message.author.id}> ⛔ **Wrong Account!**\nYou are registered as **@${user.handle}**, but posted a link from **@${detectedUser}**.`);
-                    setTimeout(() => w.delete().catch(() => {}), 8000);
-                } catch (e) {}
-                return;
-            }
-
-            // C. Duplicate (1 Link Per Session)
-            if (isUserInSession(message.author.id)) {
-                try {
-                    await message.delete();
-                    const w = await message.channel.send(`<@${message.author.id}> ⚠️ **One link per session!**`);
+                    const w = await message.channel.send(`⛔ <@${message.author.id}> **Wrong Account.** (Registered: @${user.handle})`);
                     setTimeout(() => w.delete().catch(() => {}), 5000);
                 } catch (e) {}
                 return;
             }
-
-            // D. Success
+            if (isUserInSession(message.author.id)) {
+                try {
+                    await message.delete();
+                    const w = await message.channel.send(`⚠️ <@${message.author.id}> **One link only.**`);
+                    setTimeout(() => w.delete().catch(() => {}), 5000);
+                } catch (e) {}
+                return;
+            }
             addSessionLink(tweetId, message.author.id);
             await message.react('💎');
         }
@@ -439,22 +423,15 @@ client.on('messageCreate', async message => {
     const args = message.content.slice(1).trim().split(/ +/);
     const command = args.shift().toLowerCase();
 
-    // ==================================================
-    // 👮 PERMISSIONS
-    // ==================================================
     let isAdmin = SUPER_ADMINS.includes(message.author.id);
     if (!isAdmin) {
-        // Fallback to role if not super admin
         const roleId = getSetting('admin_role_id');
         if (roleId && message.member.roles.cache.has(roleId)) isAdmin = true;
         if (message.member.permissions.has('Administrator')) isAdmin = true;
     }
+    if (!isAdmin) return; 
 
-    if (!isAdmin) return; // STRICT: ONLY ADMINS CAN USE COMMANDS
-
-    // ==================================================
-    // 👑 ADMIN COMMANDS
-    // ==================================================
+    // ADMIN COMMANDS
     if (command === 'settime') {
         const hourOptions = [];
         for (let i = 0; i < 24; i++) {
@@ -465,12 +442,14 @@ client.on('messageCreate', async message => {
         const select2 = new StringSelectMenuBuilder().setCustomId('select_s2').setPlaceholder('Session 2 Start').addOptions(hourOptions);
         const select3 = new StringSelectMenuBuilder().setCustomId('select_s3').setPlaceholder('Session 3 Start').addOptions(hourOptions);
 
-        const embed = new EmbedBuilder().setTitle("⏰ Schedule Configuration").setDescription("Select UTC Start Times.").setColor(0x00FFFF);
-        const reply = await message.reply({ embeds: [embed], components: [
-            new ActionRowBuilder().addComponents(select1),
-            new ActionRowBuilder().addComponents(select2),
-            new ActionRowBuilder().addComponents(select3)
-        ]});
+        const reply = await message.reply({ 
+            content: "**⏰ Configure Schedule (UTC)**\nSelect start times below.",
+            components: [
+                new ActionRowBuilder().addComponents(select1),
+                new ActionRowBuilder().addComponents(select2),
+                new ActionRowBuilder().addComponents(select3)
+            ]
+        });
 
         const collector = reply.createMessageComponentCollector({ componentType: ComponentType.StringSelect, time: 60000 });
         collector.on('collect', async i => {
@@ -488,14 +467,13 @@ client.on('messageCreate', async message => {
         const targetUser = message.mentions.users.first();
         const handle = args[1]?.replace('@', '').trim();
         if (!targetUser || !handle) return message.reply("❌ Usage: `!register @Discord @Twitter`");
-
-        const statusMsg = await message.reply(`🔍 Verifying X user **@${handle}**...`);
+        const statusMsg = await message.reply(`🔍 Verifying...`);
         const nid = await getNumericId(handle);
         if (nid) {
             saveUser(targetUser.id, handle, nid);
-            await statusMsg.edit(`✅ **Success:** <@${targetUser.id}> linked to **@${handle}**`);
+            await statusMsg.edit(`✅ Linked <@${targetUser.id}> to **@${handle}**`);
         } else {
-            await statusMsg.edit(`❌ **Failed:** Could not find **@${handle}** on X.`);
+            await statusMsg.edit(`❌ Failed. Check handle/API.`);
         }
     }
 
@@ -503,25 +481,23 @@ client.on('messageCreate', async message => {
 
     if (command === 'setchannel') {
         const channel = message.mentions.channels.first();
-        if (!channel) return message.reply("Tag a channel.");
         setSetting('channel_id', channel.id);
         message.reply(`✅ Raid Channel: ${channel}`);
     }
 
     if (command === 'start') {
-        message.reply("🚀 **Force Starting Session...**");
+        message.reply("🚀 **Force Open...**");
         openSession(message);
     }
-    if (command === 'end') {
-        message.reply("🛑 **Force Ending Session...**");
-        closeAndReport(message);
+    if (command === 'end' || command === 'close') {
+        message.reply("🔒 **Force Close...**");
+        closeSessionOnly(message);
     }
-    
-    // Test the warning manually
-    if (command === 'testwarn') {
-        message.reply("🔔 Sending Test Warning...");
-        sendWarning();
+    if (command === 'forcereport') {
+        message.reply("📊 **Force Report...**");
+        generateFinalReport(message);
     }
+    if (command === 'testwarn') sendWarning();
 });
 
 client.once('ready', () => {
