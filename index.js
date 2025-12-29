@@ -4,12 +4,10 @@ const {
     GatewayIntentBits, 
     Partials, 
     ActionRowBuilder, 
-    ButtonBuilder, 
-    ButtonStyle,
     ComponentType,
     StringSelectMenuBuilder,
     StringSelectMenuOptionBuilder
-} = require('discord.js'); // Removed EmbedBuilder
+} = require('discord.js');
 const axios = require('axios');
 const Database = require('better-sqlite3');
 const cron = require('node-cron');
@@ -33,7 +31,7 @@ const SUPER_ADMINS = [
 // 🔔 ROLE TO TAG
 const RAID_ROLE_ID = "1455184518104485950";
 
-const VERSION = "v17.0 (OG Yappers Text Mode)";
+const VERSION = "v18.0 (OG Text Format)";
 
 // 📂 DATABASE SETUP
 const DATA_DIR = fs.existsSync('/dataaa') ? '/dataaa' : './data';
@@ -149,8 +147,9 @@ async function getNumericId(username) {
 
 async function checkReplies(userNumericId, targetTweetIds) {
     if (!userNumericId || !RAPID_API_KEY) return 0;
+    
+    // API Call
     let fetchCount = 100; 
-
     const options = {
         method: 'GET',
         url: `https://${RAPID_HOST}/user-replies-v2`,
@@ -161,9 +160,11 @@ async function checkReplies(userNumericId, targetTweetIds) {
     try {
         const response = await axios.request(options);
         const foundIds = new Set();
+        // Collect all replies this user made
         findValuesByKey(response.data, 'in_reply_to_status_id_str', Array.from(foundIds)).forEach(id => foundIds.add(String(id)));
         findValuesByKey(response.data, 'in_reply_to_status_id', Array.from(foundIds)).forEach(id => foundIds.add(String(id)));
 
+        // Match against targets
         let matches = 0;
         for (let target of targetTweetIds) {
             if (foundIds.has(target)) matches++;
@@ -183,10 +184,9 @@ async function sendWarning() {
     if (!channelId) return;
     const channel = await client.channels.fetch(channelId).catch(() => null);
     if (!channel) return;
-    await channel.send(`🚨 <@&${RAID_ROLE_ID}> **WAKE UP!**\n│\n└─ ⏳ Session starts in **1 minute**! Get ready.`);
+    await channel.send(`🚨 <@&${RAID_ROLE_ID}> **WAKE UP!**\nSession starts in **1 minute**! Get ready.`);
 }
 
-// 1. OPEN SESSION
 async function openSession(triggerMsg = null) {
     clearSession(); 
     const channelId = getSetting('channel_id');
@@ -202,22 +202,17 @@ async function openSession(triggerMsg = null) {
     }
 
     const msg = `
-🟢 **YAPPING SESSION STARTED**
-│
-├── 💎 **Status:** OPEN
-│
-├── 📝 **INSTRUCTIONS:**
-│   1. Drop your link (1 per person)
-│   2. Reply to every other link
-│   3. Don't be late
-│
-└── <@&${RAID_ROLE_ID}> **START ENGAGING!**
+🟢 **CHANNEL OPENED**
+
+Session is now open! Please post your Elite tweets.
+One link per person.
+
+<@&${RAID_ROLE_ID}>
     `;
 
     await channel.send(msg);
 }
 
-// 2. CLOSE SESSION (Grace Period)
 async function closeSessionOnly(triggerMsg = null) {
     const channelId = getSetting('channel_id');
     if (!channelId) return triggerMsg?.reply("❌ No Channel.");
@@ -236,22 +231,19 @@ async function closeSessionOnly(triggerMsg = null) {
     const reportTime = Math.floor((Date.now() / 1000) + (2 * 60 * 60));
 
     const msg = `
-🔒 **CHANNEL LOCKED**
-│
-├── 📊 **Participants:** ${sessionData.length} Yappers
-├── ⏳ **Time Period:** 2 Hours
-│
-├── ⚠️ **ACTION REQUIRED:**
-│   Finish replying to everyone now.
-│   The bot is watching.
-│
-└── 📸 **Final Snapshot:** <t:${reportTime}:R>
+🔴 **CHANNEL CLOSED**
+
+Session has ended.
+📊 **${sessionData.length} participants** posted tweets today.
+
+⚠️ **REMINDER:** Please complete all RAID replies before the bot snapshot at <t:${reportTime}:t>!
+
+<@&${RAID_ROLE_ID}>
     `;
 
     await channel.send(msg);
 }
 
-// 3. FINAL REPORT
 async function generateFinalReport(triggerMsg = null) {
     const channelId = getSetting('channel_id');
     if (!channelId) return triggerMsg?.reply("❌ No Channel.");
@@ -261,60 +253,81 @@ async function generateFinalReport(triggerMsg = null) {
     const sessionData = getSessionLinks();
     if (sessionData.length === 0) return channel.send("⚠️ **No links posted.**");
 
-    await channel.send(`⏳ **Analyzing ${sessionData.length} yappers...**`);
+    await channel.send(`⏳ **Analyzing ${sessionData.length} participants...**`);
 
-    const targets = sessionData.map(r => r.tweet_id);
+    // 1. Get List of all Tweet IDs
+    const allTargets = sessionData.map(r => r.tweet_id);
     const results = [];
     const uniqueUsers = new Set(sessionData.map(r => r.discord_id));
 
+    // 2. Check each user
     for (let userId of uniqueUsers) {
         let user = getUser(userId);
         let score = 0;
         let handle = user ? user.handle : "Unknown";
+        
+        // FIND USER'S OWN LINK TO IGNORE
+        const userOwnLink = sessionData.find(r => r.discord_id === userId)?.tweet_id;
+        const targetsForThisUser = allTargets.filter(id => id !== userOwnLink);
+        
+        let requirement = targetsForThisUser.length; 
+        if (requirement === 0) requirement = 1;
 
         if (user && user.numeric_id) {
-            score = await checkReplies(user.numeric_id, targets);
-            if (score > targets.length) score = targets.length;
+            score = await checkReplies(user.numeric_id, targetsForThisUser);
+            if (score > requirement) score = requirement;
         }
-        results.push({ id: userId, handle, score });
+        
+        results.push({ id: userId, handle, score, req: requirement });
     }
 
     results.sort((a, b) => b.score - a.score);
 
     const dateStr = new Date().toISOString().split('T')[0];
-    let req = targets.length - 1; 
-    if (req < 1) req = 1;
 
     let completedList = "";
     let incompleteList = "";
-    let completeCount = 0;
 
     for (let p of results) {
-        let pct = Math.floor((p.score / req) * 100);
+        let pct = Math.floor((p.score / p.req) * 100);
         if (pct > 100) pct = 100;
 
+        // OG Text Format
         if (pct >= 100) {
-            completeCount++;
-            completedList += `\n│ ✅ <@${p.id}>`;
+            completedList += `\n  ▸ <@${p.id}> (@${p.handle}) — ${p.score}/${p.req} (100%)`;
         } else {
-            const filled = Math.round((pct / 100) * 5);
-            const empty = 5 - filled;
-            const bar = "▓".repeat(filled) + "░".repeat(empty);
-            incompleteList += `\n│ ⚠️ <@${p.id}> [${bar}] ${p.score}/${req}`;
+            incompleteList += `\n  ▸ <@${p.id}> (@${p.handle}) — ${p.score}/${p.req} (${pct}%)`;
         }
     }
 
     let report = `
-📑 **OG REPORT** — ${dateStr}
-│
-├── 🏆 **COMPLETED (${completeCount})**${completedList || "\n│   (None)"}
-│
-├── 🚧 **INCOMPLETE**${incompleteList || "\n│   (All Cleared!)"}
-│
-└── 📉 **Total Links:** ${targets.length}
+═══════════════════════════════════════
+📊 OG YAPPERS REPORT — ${dateStr}
+═══════════════════════════════════════
+
+📈 STATISTICS
+▸ Total tweets checked: ${allTargets.length}
+▸ Total senders: ${results.length}
+▸ Self-reply: Not required
+
+🔍 REPLY STATUS
+✅ Fully replied:${completedList || "\n  (None)"}
+
+❌ Not fully replied:${incompleteList || "\n  (None)"}
+
+═══════════════════════════════════════
+
+<@&${RAID_ROLE_ID}>
+
+💡 NOTE:
+If your account is detected as not fully replying even though you've replied to all:
+1️⃣ Check if your account is ghost banned (shadowbanned)
+2️⃣ If not ghost banned, it means you didn't actually raid that tweet
+3️⃣ Make sure your reply appears on others' timeline, not just on your profile
+
+⚠️ If you have any issues, make sure to report to admins to avoid getting WARN role!
 `;
 
-    // Handle Discord 2000 char limit
     if (report.length > 1900) {
         const chunks = report.match(/[\s\S]{1,1900}/g) || [];
         for (const chunk of chunks) await channel.send(chunk);
@@ -490,7 +503,7 @@ client.on('messageCreate', async message => {
         openSession(message);
     }
     if (command === 'end' || command === 'close') {
-        message.reply("🔒 **Force Close...**");
+        message.reply("🔒 **Force Close (Grace Period)...**");
         closeSessionOnly(message);
     }
     if (command === 'forcereport') {
