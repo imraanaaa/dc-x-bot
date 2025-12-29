@@ -7,7 +7,9 @@ const {
     ActionRowBuilder, 
     ButtonBuilder, 
     ButtonStyle,
-    ComponentType 
+    ComponentType,
+    StringSelectMenuBuilder,
+    StringSelectMenuOptionBuilder
 } = require('discord.js');
 const axios = require('axios');
 const Database = require('better-sqlite3');
@@ -19,7 +21,11 @@ const path = require('path');
 // ⚙️ CONFIGURATION
 // ==========================================
 const TOKEN = process.env.DISCORD_TOKEN; 
-const RAPID_API_KEY = process.env.RAPID_API_KEY || "5b4b9109camsh07781293c710eeap18bc01jsn25a0b784c6ec";
+
+// 🔒 SECURITY FIX: Key is now ONLY read from Environment Variables
+const RAPID_API_KEY = process.env.RAPID_API_KEY; 
+if (!RAPID_API_KEY) console.warn("⚠️ WARNING: RAPID_API_KEY is missing in Railway Variables!");
+
 const RAPID_HOST = "twitter241.p.rapidapi.com";
 
 // 👑 ADMIN LIST
@@ -28,7 +34,7 @@ const SUPER_ADMINS = [
     "1442618881285034099"  // Second Admin
 ];
 
-const VERSION = "v10.0 (Admin Verification)";
+const VERSION = "v12.0 (Secure + Help)";
 
 // 📂 DATABASE SETUP
 const DATA_DIR = fs.existsSync('/dataaa') ? '/dataaa' : './data';
@@ -64,6 +70,7 @@ const client = new Client({
 });
 
 let sessionTweets = new Map();
+let activeCronJobs = []; 
 
 // ==========================================
 // 💾 DATABASE HELPERS
@@ -125,8 +132,6 @@ async function getNumericId(username) {
 
 async function checkReplies(userNumericId, targetTweetIds) {
     if (!userNumericId) return 0;
-    
-    // Force Max 100 check
     let fetchCount = 100; 
 
     const options = {
@@ -154,12 +159,12 @@ async function checkReplies(userNumericId, targetTweetIds) {
 }
 
 // ==========================================
-// 📅 SESSION MANAGERS (FANCY REPORT)
+// 📅 SESSION MANAGERS
 // ==========================================
 async function openSession() {
     sessionTweets.clear();
     const channelId = getSetting('channel_id');
-    if (!channelId) return;
+    if (!channelId) return console.log("⚠️ No Channel Set. Skipping Session.");
 
     const channel = await client.channels.fetch(channelId).catch(() => null);
     if (!channel) return;
@@ -185,9 +190,7 @@ async function closeAndReport() {
     const targets = Array.from(sessionTweets.keys());
     if (targets.length === 0) return channel.send("🔴 Session ended. No links posted.");
 
-    let checkCount = 100;
-
-    await channel.send(`⏳ **Checking last ${checkCount} replies for ${sessionTweets.size} participants...**`);
+    await channel.send(`⏳ **Checking last 100 replies for ${sessionTweets.size} participants...**`);
 
     const results = [];
     const participants = new Set(sessionTweets.values());
@@ -206,9 +209,6 @@ async function closeAndReport() {
 
     results.sort((a, b) => b.score - a.score);
 
-    // ==========================================
-    // 🎨 NEW FANCY REPORT
-    // ==========================================
     const dateStr = new Date().toISOString().split('T')[0];
     let req = targets.length - 1; 
     if (req < 1) req = 1;
@@ -268,7 +268,31 @@ ${incompleteList || "  *(Everyone completed!)*"}
 }
 
 // ==========================================
-// 🛠️ COMMANDS & LOGIC
+// ⏰ DYNAMIC SCHEDULER
+// ==========================================
+function rescheduleCrons() {
+    activeCronJobs.forEach(job => job.stop());
+    activeCronJobs = [];
+
+    const h1 = getSetting('session1_hour') || "8";
+    const h2 = getSetting('session2_hour') || "14";
+    const h3 = getSetting('session3_hour') || "21";
+
+    [h1, h2, h3].forEach(h => {
+        const job = cron.schedule(`0 ${h} * * *`, () => {
+            console.log(`⏰ Auto-Starting Session (Hour: ${h})`);
+            openSession();
+            setTimeout(() => {
+                console.log(`⏰ Auto-Closing Session (Hour: ${h})`);
+                closeAndReport();
+            }, 60 * 60 * 1000);
+        });
+        activeCronJobs.push(job);
+    });
+}
+
+// ==========================================
+// 🛠️ COMMANDS
 // ==========================================
 client.on('messageCreate', async message => {
     if (message.author.bot) return;
@@ -278,18 +302,16 @@ client.on('messageCreate', async message => {
     if (channelId && message.channel.id === channelId) {
         const match = message.content.match(/status\/(\d+)/);
         if (match) {
-            // Check if Registered
             const user = getUser(message.author.id);
             if (!user) {
                 try {
                     await message.delete();
-                    const warning = await message.channel.send(`<@${message.author.id}> ⛔ **Access Denied.**\nYou are not registered. Ask an Admin to add you.`);
+                    const warning = await message.channel.send(`<@${message.author.id}> ⛔ **Access Denied.**\nYou are not registered. Ask an Admin.`);
                     setTimeout(() => warning.delete().catch(() => {}), 5000);
                 } catch (e) {}
                 return;
             }
 
-            // Check One Link Per Session
             const currentParticipants = Array.from(sessionTweets.values());
             if (currentParticipants.includes(message.author.id)) {
                 try {
@@ -306,12 +328,11 @@ client.on('messageCreate', async message => {
     }
 
     if (!message.content.startsWith('!')) return;
-
     const args = message.content.slice(1).trim().split(/ +/);
     const command = args.shift().toLowerCase();
 
     // ==================================================
-    // 👮 ADMIN PERMISSION CHECK
+    // 👮 PERMISSIONS
     // ==================================================
     let isAdmin = SUPER_ADMINS.includes(message.author.id);
     if (!isAdmin) {
@@ -321,42 +342,87 @@ client.on('messageCreate', async message => {
     }
 
     // ==================================================
-    // 👑 ADMIN COMMANDS ONLY
+    // 🛡️ HELP COMMAND (ADMIN ONLY)
     // ==================================================
-    
-    // ADMIN REGISTER: !register @User @TwitterHandle
-    if (command === 'register') {
-        if (!isAdmin) return message.reply("❌ **Admin Only:** Ask an admin to register you.");
+    if (command === 'help') {
+        if (!isAdmin) return; // Silent fail for non-admins
         
-        const targetUser = message.mentions.users.first();
-        const handle = args[1]?.replace('@', '').trim(); // Assumes arg 1 is handle
+        const embed = new EmbedBuilder()
+            .setTitle("🛡️ Elite Raid Admin Menu")
+            .setColor(0x0099FF)
+            .addFields(
+                { name: '⚙️ Setup', value: '`!setchannel #raid` - Set raid channel\n`!setrole @role` - Add admin role\n`!settime` - Configure Auto-Schedule' },
+                { name: '⚡ Control', value: '`!start` - Force open session\n`!end` - Force close & report\n`!register @user @handle` - Manually link user' },
+                { name: '🔧 Tools', value: '`!diagnose @handle` - Test API\n`!version` - Check bot version' }
+            )
+            .setFooter({ text: 'Visible only to Admins' });
+        
+        return message.reply({ embeds: [embed] });
+    }
 
-        if (!targetUser || !handle) {
-            return message.reply("❌ Usage: `!register @DiscordUser @TwitterHandle`");
+    // ==================================================
+    // 👑 ADMIN COMMANDS
+    // ==================================================
+    if (!isAdmin) return; 
+
+    if (command === 'settime') {
+        const hourOptions = [];
+        for (let i = 0; i < 24; i++) {
+            const label = i < 10 ? `0${i}:00 UTC` : `${i}:00 UTC`;
+            hourOptions.push(new StringSelectMenuOptionBuilder().setLabel(label).setValue(String(i)));
         }
+
+        const select1 = new StringSelectMenuBuilder().setCustomId('select_s1').setPlaceholder('Session 1 Start').addOptions(hourOptions);
+        const select2 = new StringSelectMenuBuilder().setCustomId('select_s2').setPlaceholder('Session 2 Start').addOptions(hourOptions);
+        const select3 = new StringSelectMenuBuilder().setCustomId('select_s3').setPlaceholder('Session 3 Start').addOptions(hourOptions);
+
+        const embed = new EmbedBuilder()
+            .setTitle("⏰ Configure Schedule (UTC)")
+            .setDescription("Select start times. Sessions run for 1 hour.")
+            .setColor(0x0099FF);
+
+        const reply = await message.reply({ embeds: [embed], components: [
+            new ActionRowBuilder().addComponents(select1),
+            new ActionRowBuilder().addComponents(select2),
+            new ActionRowBuilder().addComponents(select3)
+        ]});
+
+        const collector = reply.createMessageComponentCollector({ componentType: ComponentType.StringSelect, time: 60000 });
+        collector.on('collect', async i => {
+            if (i.user.id !== message.author.id) return i.reply({ content: 'Not yours.', ephemeral: true });
+            const val = i.values[0];
+            if (i.customId === 'select_s1') setSetting('session1_hour', val);
+            if (i.customId === 'select_s2') setSetting('session2_hour', val);
+            if (i.customId === 'select_s3') setSetting('session3_hour', val);
+            rescheduleCrons();
+            await i.reply({ content: `✅ Updated to **${val}:00 UTC**.`, ephemeral: true });
+        });
+    }
+
+    if (command === 'register') {
+        const targetUser = message.mentions.users.first();
+        const handle = args[1]?.replace('@', '').trim();
+        if (!targetUser || !handle) return message.reply("❌ Usage: `!register @Discord @Twitter`");
 
         const statusMsg = await message.reply(`🔍 Verifying X user **@${handle}**...`);
         const nid = await getNumericId(handle);
-
         if (nid) {
             saveUser(targetUser.id, handle, nid);
-            await statusMsg.edit(`✅ **Success:** <@${targetUser.id}> is now linked to **@${handle}** (ID: ${nid})`);
+            await statusMsg.edit(`✅ **Success:** <@${targetUser.id}> linked to **@${handle}**`);
         } else {
-            await statusMsg.edit(`❌ **Failed:** Could not find **@${handle}** on Twitter/X. Check spelling.`);
+            await statusMsg.edit(`❌ **Failed:** Could not find **@${handle}** on X.`);
         }
     }
-
-    if (!isAdmin) return; // Stop here for other commands
 
     if (command === 'version') return message.reply(`🤖 Bot Version: **${VERSION}**`);
 
     if (command === 'diagnose') {
-        if (!args[0]) return message.reply("Usage: `!diagnose @username`");
-        const handle = args[0].replace('@', '');
-        await message.reply(`🕵️ Running Diagnosis for @${handle}...`);
+        const handle = args[0]?.replace('@', '');
+        if (!handle) return message.reply("Usage: `!diagnose @username`");
+        await message.reply(`🕵️ Diagnosing @${handle}...`);
         const nid = await getNumericId(handle);
         if (!nid) return message.channel.send("❌ ID Lookup Failed.");
-        message.channel.send(`✅ Found ID: \`${nid}\`. Checking replies...`);
+        message.channel.send(`✅ ID: \`${nid}\`. Checking replies...`);
         try {
             const options = {
                 method: 'GET',
@@ -367,7 +433,7 @@ client.on('messageCreate', async message => {
             const response = await axios.request(options);
             const ids = new Set();
             findValuesByKey(response.data, 'in_reply_to_status_id_str', Array.from(ids)).forEach(id => ids.add(String(id)));
-            if (ids.size === 0) message.channel.send("⚠️ API returned valid JSON but NO replies found.");
+            if (ids.size === 0) message.channel.send("⚠️ Connected, but found 0 replies.");
             else message.channel.send(`✅ API Healthy. Found ${ids.size} replies.`);
         } catch (e) { message.channel.send(`❌ API Error: ${e.message}`); }
     }
@@ -396,17 +462,7 @@ client.on('messageCreate', async message => {
 
 client.once('ready', () => {
     console.log(`Logged in as ${client.user.tag} - ${VERSION}`);
-    const times = ["0 8 * * *", "0 14 * * *", "0 21 * * *"];
-    times.forEach(t => {
-        cron.schedule(t, () => {
-            console.log("⏰ Auto-Starting Session");
-            openSession();
-            setTimeout(() => {
-                console.log("⏰ Auto-Closing Session");
-                closeAndReport();
-            }, 60 * 60 * 1000);
-        });
-    });
+    rescheduleCrons();
 });
 
 client.login(TOKEN);
