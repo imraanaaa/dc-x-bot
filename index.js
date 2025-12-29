@@ -1,5 +1,4 @@
 require('dotenv').config();
-// 1. IMPORT BUTTON TOOLS
 const { 
     Client, 
     GatewayIntentBits, 
@@ -22,8 +21,14 @@ const path = require('path');
 const TOKEN = process.env.DISCORD_TOKEN; 
 const RAPID_API_KEY = process.env.RAPID_API_KEY || "5b4b9109camsh07781293c710eeap18bc01jsn25a0b784c6ec";
 const RAPID_HOST = "twitter241.p.rapidapi.com";
-const SUPER_ADMIN_ID = "1442310589362999428"; 
-const VERSION = "v8.0 (Permanent Registration)";
+
+// 👑 ADMIN LIST
+const SUPER_ADMINS = [
+    "1442310589362999428", // You
+    "1442618881285034099"  // Second Admin
+];
+
+const VERSION = "v10.0 (Admin Verification)";
 
 // 📂 DATABASE SETUP
 const DATA_DIR = fs.existsSync('/dataaa') ? '/dataaa' : './data';
@@ -120,9 +125,9 @@ async function getNumericId(username) {
 
 async function checkReplies(userNumericId, targetTweetIds) {
     if (!userNumericId) return 0;
-    let fetchCount = targetTweetIds.length + 20;
-    if (fetchCount < 20) fetchCount = 20;
-    if (fetchCount > 100) fetchCount = 100;
+    
+    // Force Max 100 check
+    let fetchCount = 100; 
 
     const options = {
         method: 'GET',
@@ -149,7 +154,7 @@ async function checkReplies(userNumericId, targetTweetIds) {
 }
 
 // ==========================================
-// 📅 SESSION MANAGERS
+// 📅 SESSION MANAGERS (FANCY REPORT)
 // ==========================================
 async function openSession() {
     sessionTweets.clear();
@@ -180,8 +185,7 @@ async function closeAndReport() {
     const targets = Array.from(sessionTweets.keys());
     if (targets.length === 0) return channel.send("🔴 Session ended. No links posted.");
 
-    let checkCount = targets.length + 20;
-    if(checkCount > 100) checkCount = 100;
+    let checkCount = 100;
 
     await channel.send(`⏳ **Checking last ${checkCount} replies for ${sessionTweets.size} participants...**`);
 
@@ -202,24 +206,56 @@ async function closeAndReport() {
 
     results.sort((a, b) => b.score - a.score);
 
+    // ==========================================
+    // 🎨 NEW FANCY REPORT
+    // ==========================================
     const dateStr = new Date().toISOString().split('T')[0];
-    let report = `═══════════════════════════════════════\n📊 ELITE RAID REPORT — ${dateStr}\n═══════════════════════════════════════\n\n📈 STATISTICS\n▸ Total Tweets: ${targets.length}\n▸ Participants: ${results.length}\n▸ Self-reply: Not Required\n\n🔍 STATUS\n✅ 100% Completed:`;
-
-    let req = targets.length - 1;
+    let req = targets.length - 1; 
     if (req < 1) req = 1;
+
+    let completedList = "";
+    let incompleteList = "";
+    let completeCount = 0;
 
     for (let p of results) {
         let pct = Math.floor((p.score / req) * 100);
         if (pct > 100) pct = 100;
-        const prefix = pct >= 100 ? "  ▸" : "  ⚠️";
-        report += `\n${prefix} <@${p.id}> — ${p.score}/${req} (${pct}%)`;
+
+        if (pct >= 100) {
+            completeCount++;
+            completedList += `\n✅ <@${p.id}> — **${p.score}/${req}**`;
+        } else {
+            const filled = Math.round((pct / 100) * 5);
+            const empty = 5 - filled;
+            const bar = "🟩".repeat(filled) + "⬜".repeat(empty);
+            incompleteList += `\n⚠️ <@${p.id}> — **${p.score}/${req}** ${bar} (${pct}%)`;
+        }
     }
-    report += `\n═══════════════════════════════════════`;
+
+    let report = `
+═══════════════════════════════════════
+💎 **ELITE RAID REPORT** — ${dateStr}
+═══════════════════════════════════════
+
+🎯 **SESSION STATS**
+▸ Total Links: **${targets.length}**
+▸ Participants: **${results.length}**
+
+🌟 **COMPLETED RAIDERS** (${completeCount})
+${completedList || "  *(None this session)*"}
+
+🚧 **INCOMPLETE RAIDERS**
+${incompleteList || "  *(Everyone completed!)*"}
+
+═══════════════════════════════════════
+🏆 **Excellent Work, Elites!**
+`;
 
     const embed = new EmbedBuilder()
         .setTitle("🔴 SESSION CLOSED")
         .setDescription(`Checked ${results.length} users.`)
-        .setColor(0xFF0000);
+        .setColor(0xFF0000)
+        .setTimestamp();
 
     await channel.send({ embeds: [embed] });
     
@@ -242,16 +278,18 @@ client.on('messageCreate', async message => {
     if (channelId && message.channel.id === channelId) {
         const match = message.content.match(/status\/(\d+)/);
         if (match) {
+            // Check if Registered
             const user = getUser(message.author.id);
             if (!user) {
                 try {
                     await message.delete();
-                    const warning = await message.channel.send(`<@${message.author.id}> ⚠️ **Unregistered!** Type \`!register @username\` in another channel.`);
+                    const warning = await message.channel.send(`<@${message.author.id}> ⛔ **Access Denied.**\nYou are not registered. Ask an Admin to add you.`);
                     setTimeout(() => warning.delete().catch(() => {}), 5000);
                 } catch (e) {}
                 return;
             }
 
+            // Check One Link Per Session
             const currentParticipants = Array.from(sessionTweets.values());
             if (currentParticipants.includes(message.author.id)) {
                 try {
@@ -273,70 +311,43 @@ client.on('messageCreate', async message => {
     const command = args.shift().toLowerCase();
 
     // ==================================================
-    // 🔐 REGISTER (WITH CONFIRMATION)
+    // 👮 ADMIN PERMISSION CHECK
     // ==================================================
-    if (command === 'register') {
-        // 1. Check PERMANENT Lock
-        const existing = getUser(message.author.id);
-        if (existing) {
-            return message.reply(`❌ **You are already registered** as \`@${existing.handle}\`.\nThis **cannot** be changed.`);
-        }
-
-        if (!args[0]) return message.reply("Usage: `!register @username`");
-        const handle = args[0].replace('@', '').trim();
-        
-        // 2. Lookup first
-        const initMsg = await message.reply(`🔍 verifying @${handle}...`);
-        const nid = await getNumericId(handle);
-
-        if (!nid) {
-            return initMsg.edit(`❌ Could not find user **@${handle}** on Twitter/X.\nPlease check spelling and try again.`);
-        }
-
-        // 3. Ask for Confirmation (Buttons)
-        const row = new ActionRowBuilder()
-            .addComponents(
-                new ButtonBuilder()
-                    .setCustomId('confirm_reg')
-                    .setLabel('Confirm')
-                    .setStyle(ButtonStyle.Success),
-                new ButtonBuilder()
-                    .setCustomId('cancel_reg')
-                    .setLabel('Cancel')
-                    .setStyle(ButtonStyle.Danger),
-            );
-
-        const confirmMsg = await initMsg.edit({
-            content: `⚠️ **CONFIRM REGISTRATION**\n\nDiscord: <@${message.author.id}>\nX Handle: **@${handle}** (ID: ${nid})\n\n**Once you click Confirm, you CANNOT change this.**`,
-            components: [row]
-        });
-
-        // 4. Handle Button Click
-        const collector = confirmMsg.createMessageComponentCollector({ componentType: ComponentType.Button, time: 30000 });
-
-        collector.on('collect', async i => {
-            if (i.user.id !== message.author.id) {
-                return i.reply({ content: 'This is not for you.', ephemeral: true });
-            }
-
-            if (i.customId === 'confirm_reg') {
-                saveUser(message.author.id, handle, nid);
-                await i.update({ content: `✅ **Successfully Registered!**\nYou are permanently linked to **@${handle}**.`, components: [] });
-            } else {
-                await i.update({ content: `🚫 Registration Cancelled.`, components: [] });
-            }
-        });
-
-        collector.on('end', collected => {
-            if (collected.size === 0) {
-                confirmMsg.edit({ content: '⏳ Registration timed out.', components: [] }).catch(() => {});
-            }
-        });
+    let isAdmin = SUPER_ADMINS.includes(message.author.id);
+    if (!isAdmin) {
+        const roleId = getSetting('admin_role_id');
+        if (roleId && message.member.roles.cache.has(roleId)) isAdmin = true;
+        if (message.member.permissions.has('Administrator')) isAdmin = true;
     }
 
     // ==================================================
-    // 🛠️ OTHER COMMANDS
+    // 👑 ADMIN COMMANDS ONLY
     // ==================================================
+    
+    // ADMIN REGISTER: !register @User @TwitterHandle
+    if (command === 'register') {
+        if (!isAdmin) return message.reply("❌ **Admin Only:** Ask an admin to register you.");
+        
+        const targetUser = message.mentions.users.first();
+        const handle = args[1]?.replace('@', '').trim(); // Assumes arg 1 is handle
+
+        if (!targetUser || !handle) {
+            return message.reply("❌ Usage: `!register @DiscordUser @TwitterHandle`");
+        }
+
+        const statusMsg = await message.reply(`🔍 Verifying X user **@${handle}**...`);
+        const nid = await getNumericId(handle);
+
+        if (nid) {
+            saveUser(targetUser.id, handle, nid);
+            await statusMsg.edit(`✅ **Success:** <@${targetUser.id}> is now linked to **@${handle}** (ID: ${nid})`);
+        } else {
+            await statusMsg.edit(`❌ **Failed:** Could not find **@${handle}** on Twitter/X. Check spelling.`);
+        }
+    }
+
+    if (!isAdmin) return; // Stop here for other commands
+
     if (command === 'version') return message.reply(`🤖 Bot Version: **${VERSION}**`);
 
     if (command === 'diagnose') {
@@ -361,14 +372,6 @@ client.on('messageCreate', async message => {
         } catch (e) { message.channel.send(`❌ API Error: ${e.message}`); }
     }
 
-    let isAdmin = message.author.id === SUPER_ADMIN_ID;
-    if (!isAdmin) {
-        const roleId = getSetting('admin_role_id');
-        if (roleId && message.member.roles.cache.has(roleId)) isAdmin = true;
-        if (message.member.permissions.has('Administrator')) isAdmin = true;
-    }
-
-    if (!isAdmin) return;
     if (command === 'setchannel') {
         const channel = message.mentions.channels.first();
         if (!channel) return message.reply("Tag a channel.");
