@@ -10,7 +10,7 @@ const {
     EmbedBuilder,
     ButtonBuilder,
     ButtonStyle,
-    ModalBuilder,
+    ModalBuilder,        // Left in case you add features later
     TextInputBuilder,
     TextInputStyle 
 } = require('discord.js');
@@ -86,7 +86,6 @@ function getUser(discordId) {
 }
 
 function saveUser(discordId, handle, numericId) {
-    // Fixed: Added missing parenthesis in SQL string
     const stmt = db.prepare('INSERT OR REPLACE INTO users (discord_id, handle, numeric_id) VALUES (?, ?, ?)');
     stmt.run(discordId, handle, numericId);
 }
@@ -97,12 +96,10 @@ function getSetting(key) {
 }
 
 function setSetting(key, value) {
-    // Fixed: Added missing parenthesis in SQL string
     db.prepare('INSERT OR REPLACE INTO settings (key, value) VALUES (?, ?)').run(key, value);
 }
 
 function addSessionLink(tweetId, discordId) {
-    // Fixed: Added missing parenthesis in SQL string
     db.prepare('INSERT OR REPLACE INTO session_activity (tweet_id, discord_id) VALUES (?, ?)').run(tweetId, discordId);
 }
 
@@ -341,9 +338,9 @@ async function generateFinalReport(triggerMsg = null) {
     }
 
     let report = `
-═══════════════════════════════════════
+═════════════════════════════════════
 📊 OG YAPPERS REPORT — ${dateStr}
-═══════════════════════════════════════
+═════════════════════════════════════
 
 📈 STATISTICS
 ▸ Total tweets checked: ${allTargets.length}
@@ -355,7 +352,7 @@ async function generateFinalReport(triggerMsg = null) {
 
 ❌ Not fully replied:${incompleteList || "\n  (None)"}
 
-═══════════════════════════════════════
+═════════════════════════════════════
 
 <@&${RAID_ROLE_ID}>
 
@@ -516,8 +513,6 @@ client.on('messageCreate', async message => {
         });
     }
 
-    // !checkr REMOVED AS REQUESTED
-
     if (command === 'listusers') {
         const allUsers = db.prepare('SELECT * FROM users').all();
 
@@ -638,230 +633,11 @@ client.on('messageCreate', async message => {
         message.reply("🔒 **Force Close (Grace Period)...**");
         closeSessionOnly(message);
     }
-        // ==========================================
-    // 📊 FIX: GENERATE REPORT IN CURRENT CHANNEL
-    // ==========================================
-    if (command === 'reporthere') {
-        // Use the channel where the command was typed
-        const channel = message.channel; 
-        
-        const sessionData = getSessionLinks();
-        if (sessionData.length === 0) return channel.send("⚠️ **No links posted in current session data.**");
-
-        await channel.send(`⏳ **Analyzing ${sessionData.length} participants...**`);
-        console.log(`⏳ Starting Emergency Report for channel ${channel.id}`);
-
-        // 1. Get List of all Tweet IDs
-        const allTargets = sessionData.map(r => r.tweet_id);
-        const results = [];
-        const uniqueUsers = new Set(sessionData.map(r => r.discord_id));
-
-        // 2. Check each user
-        // Note: This uses the deep check (16 pages, 50 count) from the main function
-        for (const userId of uniqueUsers) {
-            let user = getUser(userId);
-            let score = 0;
-            let handle = user ? user.handle : "Unknown";
-            
-            // FIND USER'S OWN LINK TO IGNORE
-            const userOwnLink = sessionData.find(r => r.discord_id === userId)?.tweet_id;
-            const targetsForThisUser = allTargets.filter(id => id !== userOwnLink);
-            
-            let requirement = targetsForThisUser.length; 
-            if (requirement === 0) requirement = 1;
-
-            if (user && user.numeric_id) {
-                score = await checkReplies(user.numeric_id, targetsForThisUser);
-                if (score > requirement) score = requirement;
-            }
-            
-            results.push({ id: userId, handle, score, req: requirement });
-        }
-
-        results.sort((a, b) => b.score - a.score);
-
-        const dateStr = new Date().toISOString().split('T')[0];
-
-        let completedList = "";
-        let incompleteList = "";
-
-        for (const p of results) {
-            let pct = Math.floor((p.score / p.req) * 100);
-            if (pct > 100) pct = 100;
-
-            if (pct >= 100) {
-                completedList += `\n  ▸ <@${p.id}> (@${p.handle}) — ${p.score}/${p.req} (100%)`;
-            } else {
-                incompleteList += `\n  ▸ <@${p.id}> (@${p.handle}) — ${p.score}/${p.req} (${pct}%)`;
-            }
-        }
-
-        let report = `
-═══════════════════════════════════════
-📊 OG YAPPERS REPORT — ${dateStr}
-═══════════════════════════════════════
-
-📈 STATISTICS
-▸ Total tweets checked: ${allTargets.length}
-▸ Total senders: ${results.length}
-▸ Self-reply: Not required
-
-🔍 REPLY STATUS
-✅ Fully replied:${completedList || "\n  (None)"}
-
-❌ Not fully replied:${incompleteList || "\n  (None)"}
-
-═══════════════════════════════════════
-
-<@&${RAID_ROLE_ID}>
-
-💡 NOTE:
-If your account is detected as not fully replying even though you've replied to all:
-1️⃣ Check if your account is ghost banned (shadowbanned)
-2️⃣ If not ghost banned, it means you didn't actually raid that tweet
-3️⃣ Make sure your reply appears on others' timeline, not just on your profile
-
-⚠️ If you have any issues, make sure to report to admins to avoid getting WARN role!
-`;
-
-        if (report.length > 1900) {
-            const chunks = report.match(/[\s\S]{1,1900}/g) || [];
-            for (const chunk of chunks) await channel.send(chunk);
-        } else {
-            await channel.send(report);
-        }
-        
-        console.log(`✅ Emergency Report Finished.`);
-    }
-    // ==========================================
-    // 🔍 MANUAL REPORT (Popup)
-    // ==========================================
-    if (command === 'manualr') {
-        const row = new ActionRowBuilder().addComponents(
-            new ButtonBuilder()
-                .setCustomId('start_manualr')
-                .setLabel('🔍 Open Manual Report')
-                .setStyle(ButtonStyle.Primary) // Blue button
-        );
-
-        await message.reply({ 
-            content: "Click the button below to configure the manual report:", 
-            components: [row] 
-        });
-    }
     if (command === 'forcereport') {
         message.reply("📊 **Force Report...**");
         generateFinalReport(message);
     }
-    if (command === 'testwarn') sendWarning();
 });
-
-// ==========================================
-// 🖱️ INTERACTION HANDLER (Modals & Buttons)
-// ==========================================
-client.on('interactionCreate', async interaction => {
-    
-    // 1. HANDLE BUTTON CLICK (The "Open Report" button)
-    if (interaction.isButton() && interaction.customId === 'start_manualr') {
-        // Define the Modal here
-        const modal = new ModalBuilder()
-            .setCustomId('manualr_modal')
-            .setTitle('🔍 Manual Raid Report')
-            .addComponents(
-                new ActionRowBuilder().addComponents(
-                    new TextInputBuilder()
-                        .setCustomId('tweet_links')
-                        .setLabel('Paste Tweet Links (One per line)')
-                        .setStyle(TextInputStyle.Paragraph)
-                        .setRequired(true)
-                )
-            );
-        
-        // Show the modal
-        return await interaction.showModal(modal);
-    }
-
-    // 2. HANDLE MODAL SUBMISSION (When user clicks Submit)
-    if (!interaction.isModalSubmit()) return;
-    if (interaction.customId !== 'manualr_modal') return;
-
-    // 1. Get the text from the box
-    const linksText = interaction.fields.getTextInputValue('tweet_links');
-    
-    // 2. Extract Tweet IDs using Regex
-    const matches = linksText.matchAll(/(?:x|twitter)\.com\/(?:[a-zA-Z0-9_]+\/)?status\/(\d+)/g);
-    const targetIds = Array.from(matches).map(m => m[1]);
-
-    if (targetIds.length === 0) {
-        return interaction.reply({ content: "❌ No valid X/Twitter links found.", ephemeral: true });
-    }
-
-    // 3. Defer reply (takes time to check)
-    await interaction.deferReply({ ephemeral: true });
-    const channel = interaction.channel;
-
-    await channel.send(`⏳ **Manual Report:** Checking ${targetIds.length} posts against all registered users...`);
-
-    // 4. Get ALL registered users (not just current session)
-    const allUsers = db.prepare('SELECT * FROM users').all();
-    const results = [];
-
-    // 5. Loop through every user
-    for (const user of allUsers) {
-        let score = 0;
-        if (user.numeric_id) {
-            score = await checkReplies(user.numeric_id, targetIds);
-            // Cap score at target length
-            if (score > targetIds.length) score = targetIds.length;
-        }
-        results.push({ id: user.discord_id, handle: user.handle, score, req: targetIds.length });
-    }
-
-    results.sort((a, b) => b.score - a.score);
-
-    // 6. Format Report
-    const dateStr = new Date().toISOString().split('T')[0];
-    let completedList = "";
-    let incompleteList = "";
-
-    for (const p of results) {
-        let pct = Math.floor((p.score / p.req) * 100);
-        if (pct > 100) pct = 100;
-
-        if (pct >= 100) {
-            completedList += `\n  ▸ <@${p.id}> (@${p.handle}) — ${p.score}/${p.req} (100%)`;
-        } else {
-            incompleteList += `\n  ▸ <@${p.id}> (@${p.handle}) — ${p.score}/${p.req} (${pct}%)`;
-        }
-    }
-
-    let report = `
-═══════════════════════════════════════
-📊 MANUAL RAID REPORT — ${dateStr}
-═══════════════════════════════════════
-
-📈 STATISTICS
-▸ Target Tweets: ${targetIds.length}
-▸ Total Users Checked: ${results.length}
-
-🔍 REPLY STATUS
-✅ Fully replied:${completedList || "\n  (None)"}
-
-❌ Not fully replied:${incompleteList || "\n  (None)"}
-
-═══════════════════════════════════════
-`;
-
-    if (report.length > 1900) {
-        const chunks = report.match(/[\s\S]{1,1900}/g) || [];
-        for (const chunk of chunks) await channel.send(chunk);
-    } else {
-        await channel.send(report);
-    }
-
-    await interaction.editReply({ content: "✅ Report generated!" });
-});
-
 
 client.once('ready', () => {
     console.log(`Logged in as ${client.user.tag} - ${VERSION}`);
