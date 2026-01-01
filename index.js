@@ -34,7 +34,7 @@ const SUPER_ADMINS = [
 // 🔔 ROLE TO TAG (For Lock/Unlock)
 const RAID_ROLE_ID = "1455184518104485950";
 
-const VERSION = "v19.2 (Smart Admin Injection)";
+const VERSION = "v19.3 (V1 API & Deep Scan)";
 
 // 📂 DATABASE SETUP
 const DATA_DIR = fs.existsSync('/dataaa') ? '/dataaa' : './data';
@@ -175,15 +175,18 @@ async function checkReplies(userNumericId, targetTweetIds) {
 
     let matches = 0;
     let nextToken = null;
+    
+    // Config: 16 pages * 45 tweets = 720 tweets depth (Covers > 400 requirement)
     const maxPages = 16;
     const countPerPage = 45;
 
     for (let i = 0; i < maxPages; i++) {
+        // Delay to prevent Rate Limit 429
         if (i > 0) await new Promise(resolve => setTimeout(resolve, 800));
 
         const options = {
             method: 'GET',
-            url: `https://${RAPID_HOST}/user-replies-v2`,
+            url: `https://${RAPID_HOST}/user-replies`, // CHANGED TO V1
             params: { 
                 user: userNumericId, 
                 count: String(countPerPage),
@@ -223,6 +226,7 @@ async function checkReplies(userNumericId, targetTweetIds) {
             }
 
         } catch (e) {
+            // 🛡️ RECOVERY SYSTEM: If Rate Limited, wait and retry.
             if (e.response && e.response.status === 429) {
                 console.warn(`⚠️ Rate Limit Hit for user ${userNumericId}. Retrying in 5s...`);
                 await new Promise(r => setTimeout(r, 5000));
