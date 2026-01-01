@@ -34,10 +34,9 @@ const SUPER_ADMINS = [
 // 🔔 ROLE TO TAG
 const RAID_ROLE_ID = "1455184518104485950";
 
-const VERSION = "v18.6 (Fix: Rate Limit Retry)";
+const VERSION = "v18.7 (Ghost Injection Fix)";
 
 // 📂 DATABASE SETUP
-// Uses /dataaa if available (Railway persistent volume), else local ./data
 const DATA_DIR = fs.existsSync('/dataaa') ? '/dataaa' : './data';
 if (!fs.existsSync(DATA_DIR)) fs.mkdirSync(DATA_DIR, { recursive: true });
 
@@ -86,7 +85,8 @@ function getUser(discordId) {
 }
 
 function getUserByHandle(handle) {
-    return db.prepare('SELECT * FROM users WHERE handle = ?').get(handle);
+    // FIX 1: Case-insensitive lookup so Ugamerzzone911 matches ugamerzzone911
+    return db.prepare('SELECT * FROM users WHERE LOWER(handle) = LOWER(?)').get(handle);
 }
 
 function saveUser(discordId, handle, numericId) {
@@ -169,7 +169,6 @@ async function getTweetAuthorHandle(tweetId) {
     }
 }
 
-// 🔧 FIX: Added Retry Logic for Rate Limits
 async function checkReplies(userNumericId, targetTweetIds) {
     if (!userNumericId || !RAPID_API_KEY) return 0;
 
@@ -182,7 +181,6 @@ async function checkReplies(userNumericId, targetTweetIds) {
     const countPerPage = 45;
 
     for (let i = 0; i < maxPages; i++) {
-        // Simple delay to be nice to API
         if (i > 0) await new Promise(resolve => setTimeout(resolve, 500));
 
         const options = {
@@ -199,12 +197,10 @@ async function checkReplies(userNumericId, targetTweetIds) {
         try {
             const response = await axios.request(options);
             
-            // Collect all Reply IDs found in this batch
             const foundIds = new Set();
             findValuesByKey(response.data, 'in_reply_to_status_id_str', Array.from(foundIds)).forEach(id => foundIds.add(String(id)));
             findValuesByKey(response.data, 'in_reply_to_status_id', Array.from(foundIds)).forEach(id => foundIds.add(String(id)));
 
-            // Deep search for objects typed as 'replied_to'
             const deepSearch = (obj) => {
                 if (Array.isArray(obj)) {
                     obj.forEach(item => deepSearch(item));
@@ -217,30 +213,26 @@ async function checkReplies(userNumericId, targetTweetIds) {
             };
             deepSearch(response.data);
 
-            // Compare found IDs with Targets
             for (const id of foundIds) {
                 if (targetSet.has(id)) matches++;
             }
 
-            // Pagination
             const cursors = findValuesByKey(response.data, 'cursor');
             if (cursors.length > 0) {
                 nextToken = cursors[cursors.length - 1];
             } else {
-                break; // No more pages
+                break;
             }
 
         } catch (e) {
-            // 🚨 CRITICAL FIX: Handle Rate Limits (429) by waiting and retrying
             if (e.response && e.response.status === 429) {
                 console.warn(`⚠️ Rate Limit Hit for user ${userNumericId}. Waiting 5s...`);
                 await new Promise(r => setTimeout(r, 5000));
-                i--; // Decrement i to retry this page loop
+                i--;
                 continue;
             }
-            
             console.error(`❌ API Reply Error for user ${userNumericId}: ${e.message}`);
-            break; // Stop on other errors
+            break;
         }
     }
 
@@ -276,7 +268,7 @@ async function openSession(triggerMsg = null) {
 🟢 **CHANNEL OPENED**${isManualTestMode ? " **(TEST MODE)**" : ""}
 
 Session is now open! Please post your Elite tweets.
- ${isManualTestMode ? "🧪 **SMART INJECTION ACTIVE:** Admins can paste multiple links from different accounts. The bot will auto-assign them!" : "One link per person."}
+ ${isManualTestMode ? "🧪 **SMART INJECTION ACTIVE:** Admins can paste multiple links. The bot will assign them to owners or Ghosts." : "One link per person."}
 
 <@&${RAID_ROLE_ID}>
     `;
@@ -330,11 +322,23 @@ async function generateFinalReport(triggerMsg = null) {
     const results = [];
     const uniqueUsers = new Set(sessionData.map(r => r.discord_id));
 
-    // Process users sequentially to prevent massive API flooding
+    // Process users
     for (let userId of uniqueUsers) {
         let user = getUser(userId);
         let score = 0;
-        let handle = user ? user.handle : "Unknown";
+        let handle = "Unknown";
+        let isGhost = false;
+
+        // FIX 3: Detect Ghost Users (unregistered accounts found during Injection)
+        if (userId.startsWith('ghost:')) {
+            isGhost = true;
+            handle = userId.split(':')[1]; // Extract twitter handle from ghost ID
+        } else if (user) {
+            handle = user.handle;
+        } else {
+            // Should not happen for registered users, but fallback
+            handle = "Unknown";
+        }
         
         const userLinks = sessionData.filter(r => r.discord_id === userId).map(r => r.tweet_id);
         const targetsForThisUser = allTargets.filter(id => !userLinks.includes(id));
@@ -342,16 +346,14 @@ async function generateFinalReport(triggerMsg = null) {
         let requirement = targetsForThisUser.length; 
         if (requirement === 0) requirement = 1;
 
-        if (user && user.numeric_id) {
-            // Check replies for this user
+        // Only check replies for REAL users who have a numeric_id
+        if (!isGhost && user && user.numeric_id) {
             score = await checkReplies(user.numeric_id, targetsForThisUser);
             if (score > requirement) score = requirement;
-            
-            // Add a small delay between users to avoid Rate Limiting
             await new Promise(r => setTimeout(r, 2000));
         }
         
-        results.push({ id: userId, handle, score, req: requirement });
+        results.push({ id: userId, handle, score, req: requirement, isGhost });
     }
 
     results.sort((a, b) => b.score - a.score);
@@ -365,10 +367,13 @@ async function generateFinalReport(triggerMsg = null) {
         let pct = Math.floor((p.score / p.req) * 100);
         if (pct > 100) pct = 100;
 
+        // Format display name. If ghost, show handle only.
+        let displayName = p.isGhost ? `👻 @${p.handle}` : `<@${p.id}> (@${p.handle})`;
+
         if (pct >= 100) {
-            completedList += `\n  ▸ <@${p.id}> (@${p.handle}) — ${p.score}/${p.req} (100%)`;
+            completedList += `\n  ▸ ${displayName} — ${p.score}/${p.req} (100%)`;
         } else {
-            incompleteList += `\n  ▸ <@${p.id}> (@${p.handle}) — ${p.score}/${p.req} (${pct}%)`;
+            incompleteList += `\n  ▸ ${displayName} — ${p.score}/${p.req} (${pct}%)`;
         }
     }
 
@@ -409,7 +414,7 @@ If your account is detected as not fully replying even though you've replied to 
 }
 
 // ==========================================
-// ⏰ SCHEDULER
+// ⏰ SCHEDULER (Unchanged)
 // ==========================================
 function rescheduleCrons() {
     activeCronJobs.forEach(job => job.stop());
@@ -463,7 +468,6 @@ client.on('messageCreate', async message => {
     if (channelId && message.channel.id === channelId) {
         const user = getUser(message.author.id);
         
-        // Regex to find all URLs
         const urlRegex = /(?:x|twitter)\.com\/(?:[a-zA-Z0-9_]+\/status\/|i\/status\/)(\d+)/g;
         const matches = [...message.content.matchAll(urlRegex)];
 
@@ -489,7 +493,6 @@ client.on('messageCreate', async message => {
                 let tweetId = match[1];
                 let finalDiscordId = message.author.id; // Default: Assign to sender
                 
-                // If Test Mode is ON, find the REAL owner of the tweet
                 if (isTestModeAllowed) {
                     const twitterHandle = await getTweetAuthorHandle(tweetId);
                     if (twitterHandle) {
@@ -497,6 +500,10 @@ client.on('messageCreate', async message => {
                         if (dbUser) {
                             finalDiscordId = dbUser.discord_id;
                             feedbackMsg += `<@${dbUser.discord_id}> `;
+                        } else {
+                            // FIX 2: Create Ghost ID for unregistered users so they don't map to Admin
+                            finalDiscordId = `ghost:${twitterHandle.toLowerCase()}`;
+                            feedbackMsg += `👻@${twitterHandle} `;
                         }
                     }
                 }
@@ -528,6 +535,7 @@ client.on('messageCreate', async message => {
     }
     if (!isAdmin) return; 
 
+    // ... (Existing commands like settime, listusers, register unchanged) ...
     if (command === 'settime') {
         const hourOptions = [];
         for (let i = 0; i < 24; i++) {
@@ -630,7 +638,7 @@ client.on('messageCreate', async message => {
     // 🔥 ADMIN TEST TOOLS
     if (command === 'start') {
         isManualTestMode = true;
-        message.reply("🚀 **Force Open...**");
+        message.reply("🚀 **Force Open (Smart Injection Mode)**\nPaste links from ANY registered account. The bot will find and assign them!");
         openSession(message);
     }
 
