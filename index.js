@@ -9,7 +9,10 @@ const {
     StringSelectMenuOptionBuilder,
     EmbedBuilder,
     ButtonBuilder,
-    ButtonStyle
+    ButtonStyle,
+     ModalBuilder,        // <--- ADD THIS
+    TextInputBuilder,    // <--- ADD THIS
+    TextInputStyle 
 } = require('discord.js');
 const axios = require('axios');
 const Database = require('better-sqlite3');
@@ -727,11 +730,113 @@ If your account is detected as not fully replying even though you've replied to 
         
         console.log(`✅ Emergency Report Finished.`);
     }
+        if (command === 'manualr') {
+        // Create the popup modal
+        const modal = new ModalBuilder()
+            .setCustomId('manualr_modal')
+            .setTitle('🔍 Manual Raid Report')
+            .addComponents(
+                new ActionRowBuilder().addComponents(
+                    new TextInputBuilder()
+                        .setCustomId('tweet_links')
+                        .setLabel('Paste Tweet Links (One per line)')
+                        .setStyle(TextInputStyle.Paragraph) // Big text box
+                        .setRequired(true)
+                )
+            );
+        
+        await message.showModal(modal);
+    }
     if (command === 'forcereport') {
         message.reply("📊 **Force Report...**");
         generateFinalReport(message);
     }
     if (command === 'testwarn') sendWarning();
+});
+
+// ==========================================
+// 🖱️ INTERACTION HANDLER (Modals)
+// ==========================================
+client.on('interactionCreate', async interaction => {
+    // We only care about Modal Submissions
+    if (!interaction.isModalSubmit()) return;
+    if (interaction.customId !== 'manualr_modal') return;
+
+    // 1. Get the text from the box
+    const linksText = interaction.fields.getTextInputValue('tweet_links');
+    
+    // 2. Extract Tweet IDs using Regex
+    const matches = linksText.matchAll(/(?:x|twitter)\.com\/(?:[a-zA-Z0-9_]+\/)?status\/(\d+)/g);
+    const targetIds = Array.from(matches).map(m => m[1]);
+
+    if (targetIds.length === 0) {
+        return interaction.reply({ content: "❌ No valid X/Twitter links found.", ephemeral: true });
+    }
+
+    // 3. Defer reply (takes time to check)
+    await interaction.deferReply({ ephemeral: true });
+    const channel = interaction.channel;
+
+    await channel.send(`⏳ **Manual Report:** Checking ${targetIds.length} posts against all registered users...`);
+
+    // 4. Get ALL registered users (not just current session)
+    const allUsers = db.prepare('SELECT * FROM users').all();
+    const results = [];
+
+    // 5. Loop through every user
+    for (const user of allUsers) {
+        let score = 0;
+        if (user.numeric_id) {
+            score = await checkReplies(user.numeric_id, targetIds);
+            // Cap score at target length
+            if (score > targetIds.length) score = targetIds.length;
+        }
+        results.push({ id: user.discord_id, handle: user.handle, score, req: targetIds.length });
+    }
+
+    results.sort((a, b) => b.score - a.score);
+
+    // 6. Format Report
+    const dateStr = new Date().toISOString().split('T')[0];
+    let completedList = "";
+    let incompleteList = "";
+
+    for (const p of results) {
+        let pct = Math.floor((p.score / p.req) * 100);
+        if (pct > 100) pct = 100;
+
+        if (pct >= 100) {
+            completedList += `\n  ▸ <@${p.id}> (@${p.handle}) — ${p.score}/${p.req} (100%)`;
+        } else {
+            incompleteList += `\n  ▸ <@${p.id}> (@${p.handle}) — ${p.score}/${p.req} (${pct}%)`;
+        }
+    }
+
+    let report = `
+═══════════════════════════════════════
+📊 MANUAL RAID REPORT — ${dateStr}
+═══════════════════════════════════════
+
+📈 STATISTICS
+▸ Target Tweets: ${targetIds.length}
+▸ Total Users Checked: ${results.length}
+
+🔍 REPLY STATUS
+✅ Fully replied:${completedList || "\n  (None)"}
+
+❌ Not fully replied:${incompleteList || "\n  (None)"}
+
+═══════════════════════════════════════
+`;
+
+    if (report.length > 1900) {
+        const chunks = report.match(/[\s\S]{1,1900}/g) || [];
+        for (const chunk of chunks) await channel.send(chunk);
+    } else {
+        await channel.send(report);
+    }
+
+    await interaction.editReply({ content: "✅ Report generated!" });
 });
 
 client.once('ready', () => {
