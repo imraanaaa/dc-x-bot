@@ -499,7 +499,7 @@ client.on('messageCreate', async message => {
             
             let tweets = [];
             let nextToken = null;
-            const maxPages = 4; // Fetch 4 pages (200 items each = 800 items total)
+            const maxPages = 18; // Fetch 4 pages (200 items each = 800 items total)
 
             // Loop through pages
             for (let i = 0; i < maxPages; i++) {
