@@ -6,7 +6,10 @@ const {
     ActionRowBuilder, 
     ComponentType,
     StringSelectMenuBuilder,
-    StringSelectMenuOptionBuilder
+    StringSelectMenuOptionBuilder,
+    EmbedBuilder,
+    ButtonBuilder,     // <--- ADD THIS
+    ButtonStyle        // <--- ADD THIS
 } = require('discord.js');
 const axios = require('axios');
 const Database = require('better-sqlite3');
@@ -473,6 +476,96 @@ client.on('messageCreate', async message => {
             if (i.customId === 'select_s3') setSetting('session3_hour', val);
             rescheduleCrons();
             await i.reply({ content: `✅ Set to **${val}:00 UTC**.`, ephemeral: true });
+        });
+    }
+
+        if (command === 'listusers') {
+        const allUsers = db.prepare('SELECT * FROM users').all();
+
+        if (allUsers.length === 0) {
+            return message.reply({ content: "❌ No users are currently registered." });
+        }
+
+        // Pagination Settings
+        const itemsPerPage = 15; // How many users per page
+        let currentPage = 0;
+        const totalPages = Math.ceil(allUsers.length / itemsPerPage);
+
+        // Helper function to generate the embed for a specific page
+        const generateEmbed = (page) => {
+            const start = page * itemsPerPage;
+            const end = start + itemsPerPage;
+            const pageData = allUsers.slice(start, end);
+
+            const userListString = pageData.map(u => {
+                return `<@${u.discord_id}> — [@${u.handle}](https://x.com/${u.handle})`;
+            }).join('\n');
+
+            return new EmbedBuilder()
+                .setTitle('📋 Registered Database')
+                .setDescription(userListString)
+                .setColor('#3498db')
+                .setFooter({ text: `Page ${page + 1} / ${totalPages} | Total Users: ${allUsers.length}` })
+                .setTimestamp();
+        };
+
+        // Create the buttons (Grey = ButtonStyle.Secondary)
+        const getButtons = (page) => {
+            return new ActionRowBuilder().addComponents(
+                new ButtonBuilder()
+                    .setCustomId('prev_page')
+                    .setLabel('Previous')
+                    .setStyle(ButtonStyle.Secondary) // Grey
+                    .setDisabled(page === 0),
+                new ButtonBuilder()
+                    .setCustomId('next_page')
+                    .setLabel('Next')
+                    .setStyle(ButtonStyle.Secondary) // Grey
+                    .setDisabled(page === totalPages - 1)
+            );
+        };
+
+        // Send the first message
+        const msg = await message.reply({ 
+            embeds: [generateEmbed(currentPage)], 
+            components: [getButtons(currentPage)] 
+        });
+
+        // Collector to handle button clicks
+        const collector = msg.createMessageComponentCollector({ time: 60000 }); // 60 seconds timeout
+
+        collector.on('collect', async i => {
+            // Ensure only the person who typed the command can click the buttons
+            if (i.user.id !== message.author.id) {
+                return i.reply({ content: '❌ These buttons are not for you!', ephemeral: true });
+            }
+
+            // Update page number based on button clicked
+            if (i.customId === 'prev_page') currentPage--;
+            if (i.customId === 'next_page') currentPage++;
+
+            // Update the message with new embed and new button states
+            await i.update({ 
+                embeds: [generateEmbed(currentPage)], 
+                components: [getButtons(currentPage)] 
+            });
+        });
+
+        // When time runs out, disable the buttons
+        collector.on('end', async () => {
+            const disabledRow = new ActionRowBuilder().addComponents(
+                new ButtonBuilder()
+                    .setCustomId('prev_page')
+                    .setLabel('Previous')
+                    .setStyle(ButtonStyle.Secondary)
+                    .setDisabled(true),
+                new ButtonBuilder()
+                    .setCustomId('next_page')
+                    .setLabel('Next')
+                    .setStyle(ButtonStyle.Secondary)
+                    .setDisabled(true)
+            );
+            await msg.edit({ components: [disabledRow] }).catch(() => {});
         });
     }
 
