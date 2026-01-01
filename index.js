@@ -479,7 +479,7 @@ client.on('messageCreate', async message => {
         });
     }
 
-            if (command === 'checkr') {
+                if (command === 'checkr') {
         // 1. Check if a user was mentioned
         const targetUser = message.mentions.users.first();
         if (!targetUser) return message.reply("❌ Usage: `!checkr @DiscordUser`");
@@ -543,35 +543,32 @@ client.on('messageCreate', async message => {
                     extractTweets(response.data);
 
                     // --- FIND CURSOR FOR NEXT PAGE ---
-                    // We search the whole response for any "cursor" keys
-                    // Twitter API usually puts it in instructions. We take the last one found (bottom cursor).
                     const cursors = findValuesByKey(response.data, 'cursor');
                     
                     if (cursors.length > 0) {
                         nextToken = cursors[cursors.length - 1];
                     } else {
-                        // No more pages, stop the loop
-                        break;
+                        break; // No more pages
                     }
 
                 } catch (e) {
                     console.error(`❌ API Error: ${e.message}`);
-                    break; // Stop if there is an error
+                    break; 
                 }
             }
             
             return tweets; 
         };
 
-        // 4. Fetch Data (This will now take a bit longer as it hits API 4 times)
+        // 4. Fetch Data
         const tweets = await getRecentRepliesData(user.numeric_id);
 
         if (tweets.length === 0) {
             return statusMsg.edit("❌ API Error: No replies found or the account is private/suspended.");
         }
 
-        // 5. Pagination Setup (For the Discord Embed)
-        const itemsPerPage = 30;
+        // 5. Pagination Setup
+        const itemsPerPage = 20; // Reduced from 30 to prevent hitting 4096 char limit
         let currentPage = 0;
         const totalPages = Math.ceil(tweets.length / itemsPerPage);
 
@@ -584,15 +581,21 @@ client.on('messageCreate', async message => {
             // Format the list
             const content = pageData.map(t => {
                 const link = `https://x.com/i/status/${t.id}`;
-                // Truncate text if it's too long
+                // Truncate text if it's too long (kept to 60 for cleanliness)
                 const displayText = t.text.length > 60 ? t.text.substring(0, 60) + "..." : t.text;
                 const replyTarget = t.replyTo ? `(Reply to: ${t.replyTo})` : `(Root Reply)`;
                 return `**[Link](${link})**\n"${displayText}" ${replyTarget}`;
             }).join('\n\n');
 
+            // SAFETY CHECK: Ensure description is under 4096 chars
+            let safeContent = content;
+            if (safeContent.length > 4090) {
+                safeContent = safeContent.substring(0, 4085) + "...";
+            }
+
             return new EmbedBuilder()
                 .setTitle(`📝 Last Replies for @${user.handle}`)
-                .setDescription(content || "No data for this page.")
+                .setDescription(safeContent || "No data for this page.")
                 .setColor('#3498db') // Blue Embed
                 .setFooter({ text: `Page ${page + 1} / ${totalPages} | Total Replies Found: ${tweets.length}` })
                 .setTimestamp();
@@ -622,7 +625,7 @@ client.on('messageCreate', async message => {
         });
 
         // Collector for pagination
-        const collector = statusMsg.createMessageComponentCollector({ time: 120000 }); // 2 min timeout
+        const collector = statusMsg.createMessageComponentCollector({ time: 120000 }); 
 
         collector.on('collect', async i => {
             if (i.user.id !== message.author.id) {
