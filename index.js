@@ -4,15 +4,12 @@ const {
     GatewayIntentBits, 
     Partials, 
     ActionRowBuilder, 
-    ComponentType,
-    StringSelectMenuBuilder,
-    StringSelectMenuOptionBuilder,
-    EmbedBuilder,
-    ButtonBuilder,
-    ButtonStyle,
-    ModalBuilder,
-    TextInputBuilder,
-    TextInputStyle 
+    ComponentType, 
+    StringSelectMenuBuilder, 
+    StringSelectMenuOptionBuilder, 
+    EmbedBuilder, 
+    ButtonBuilder, 
+    ButtonStyle 
 } = require('discord.js');
 const axios = require('axios');
 const Database = require('better-sqlite3');
@@ -37,15 +34,17 @@ const SUPER_ADMINS = [
 // 🔔 ROLE TO TAG
 const RAID_ROLE_ID = "1455184518104485950";
 
-const VERSION = "v18.4 (Bulk Paste Test Mode)";
+const VERSION = "v18.6 (Fix: Rate Limit Retry)";
 
 // 📂 DATABASE SETUP
+// Uses /dataaa if available (Railway persistent volume), else local ./data
 const DATA_DIR = fs.existsSync('/dataaa') ? '/dataaa' : './data';
 if (!fs.existsSync(DATA_DIR)) fs.mkdirSync(DATA_DIR, { recursive: true });
 
 const dbPath = path.join(DATA_DIR, 'raid.db');
 const db = new Database(dbPath);
 
+// Initialize Tables
 db.exec(`
   CREATE TABLE IF NOT EXISTS users (
     discord_id TEXT PRIMARY KEY,
@@ -86,6 +85,10 @@ function getUser(discordId) {
     return db.prepare('SELECT * FROM users WHERE discord_id = ?').get(discordId);
 }
 
+function getUserByHandle(handle) {
+    return db.prepare('SELECT * FROM users WHERE handle = ?').get(handle);
+}
+
 function saveUser(discordId, handle, numericId) {
     const stmt = db.prepare('INSERT OR REPLACE INTO users (discord_id, handle, numeric_id) VALUES (?, ?, ?)');
     stmt.run(discordId, handle, numericId);
@@ -112,13 +115,8 @@ function clearSession() {
     db.prepare('DELETE FROM session_activity').run();
 }
 
-function isUserInSession(discordId) {
-    const row = db.prepare('SELECT 1 FROM session_activity WHERE discord_id = ?').get(discordId);
-    return !!row;
-}
-
 // ==========================================
-// 📡 API ENGINE
+// 📡 API ENGINE (With Retry Logic)
 // ==========================================
 function findValuesByKey(obj, key, list = []) {
     if (!obj) return list;
@@ -152,6 +150,26 @@ async function getNumericId(username) {
     return null;
 }
 
+async function getTweetAuthorHandle(tweetId) {
+    if (!RAPID_API_KEY) return null;
+    try {
+        const options = {
+            method: 'GET',
+            url: `https://${RAPID_HOST}/tweet`,
+            params: { id: tweetId },
+            headers: { 'x-rapidapi-key': RAPID_API_KEY, 'x-rapidapi-host': RAPID_HOST }
+        };
+        const response = await axios.request(options);
+        const handles = findValuesByKey(response.data, 'screen_name');
+        if (handles.length > 0) return handles[0].toLowerCase();
+        return null;
+    } catch (e) {
+        console.error(`[Lookup] Failed to find author for tweet ${tweetId}`);
+        return null;
+    }
+}
+
+// 🔧 FIX: Added Retry Logic for Rate Limits
 async function checkReplies(userNumericId, targetTweetIds) {
     if (!userNumericId || !RAPID_API_KEY) return 0;
 
@@ -164,7 +182,8 @@ async function checkReplies(userNumericId, targetTweetIds) {
     const countPerPage = 45;
 
     for (let i = 0; i < maxPages; i++) {
-        if (i > 0) await new Promise(resolve => setTimeout(resolve, 100));
+        // Simple delay to be nice to API
+        if (i > 0) await new Promise(resolve => setTimeout(resolve, 500));
 
         const options = {
             method: 'GET',
@@ -179,11 +198,13 @@ async function checkReplies(userNumericId, targetTweetIds) {
 
         try {
             const response = await axios.request(options);
+            
+            // Collect all Reply IDs found in this batch
             const foundIds = new Set();
-
             findValuesByKey(response.data, 'in_reply_to_status_id_str', Array.from(foundIds)).forEach(id => foundIds.add(String(id)));
             findValuesByKey(response.data, 'in_reply_to_status_id', Array.from(foundIds)).forEach(id => foundIds.add(String(id)));
 
+            // Deep search for objects typed as 'replied_to'
             const deepSearch = (obj) => {
                 if (Array.isArray(obj)) {
                     obj.forEach(item => deepSearch(item));
@@ -196,23 +217,30 @@ async function checkReplies(userNumericId, targetTweetIds) {
             };
             deepSearch(response.data);
 
+            // Compare found IDs with Targets
             for (const id of foundIds) {
                 if (targetSet.has(id)) matches++;
             }
 
+            // Pagination
             const cursors = findValuesByKey(response.data, 'cursor');
             if (cursors.length > 0) {
                 nextToken = cursors[cursors.length - 1];
             } else {
-                break;
+                break; // No more pages
             }
 
         } catch (e) {
-            console.error(`❌ API Reply Error for user ${userNumericId}: ${e.message}`);
+            // 🚨 CRITICAL FIX: Handle Rate Limits (429) by waiting and retrying
             if (e.response && e.response.status === 429) {
-                console.warn(`⚠️ Rate Limit Hit.`);
+                console.warn(`⚠️ Rate Limit Hit for user ${userNumericId}. Waiting 5s...`);
+                await new Promise(r => setTimeout(r, 5000));
+                i--; // Decrement i to retry this page loop
+                continue;
             }
-            break;
+            
+            console.error(`❌ API Reply Error for user ${userNumericId}: ${e.message}`);
+            break; // Stop on other errors
         }
     }
 
@@ -248,7 +276,7 @@ async function openSession(triggerMsg = null) {
 🟢 **CHANNEL OPENED**${isManualTestMode ? " **(TEST MODE)**" : ""}
 
 Session is now open! Please post your Elite tweets.
- ${isManualTestMode ? "✅ **TEST MODE ON:** Admins can paste multiple links in one message!" : "One link per person."}
+ ${isManualTestMode ? "🧪 **SMART INJECTION ACTIVE:** Admins can paste multiple links from different accounts. The bot will auto-assign them!" : "One link per person."}
 
 <@&${RAID_ROLE_ID}>
     `;
@@ -296,20 +324,18 @@ async function generateFinalReport(triggerMsg = null) {
     const sessionData = getSessionLinks();
     if (sessionData.length === 0) return channel.send("⚠️ **No links posted.**");
 
-    await channel.send(`⏳ **Analyzing ${sessionData.length} participants...**`);
+    await channel.send(`⏳ **Analyzing ${sessionData.length} participants...** (This may take a moment)`);
 
     const allTargets = sessionData.map(r => r.tweet_id);
     const results = [];
-    // We group by Discord ID. If 1 Admin posts 3 links, they appear once in results.
-    // This is normal behavior, as 1 person can't reply to their own tweets from 3 different accounts easily.
     const uniqueUsers = new Set(sessionData.map(r => r.discord_id));
 
+    // Process users sequentially to prevent massive API flooding
     for (let userId of uniqueUsers) {
         let user = getUser(userId);
         let score = 0;
         let handle = user ? user.handle : "Unknown";
         
-        // Filter out this user's own tweets (so they don't have to reply to themselves)
         const userLinks = sessionData.filter(r => r.discord_id === userId).map(r => r.tweet_id);
         const targetsForThisUser = allTargets.filter(id => !userLinks.includes(id));
         
@@ -317,8 +343,12 @@ async function generateFinalReport(triggerMsg = null) {
         if (requirement === 0) requirement = 1;
 
         if (user && user.numeric_id) {
+            // Check replies for this user
             score = await checkReplies(user.numeric_id, targetsForThisUser);
             if (score > requirement) score = requirement;
+            
+            // Add a small delay between users to avoid Rate Limiting
+            await new Promise(r => setTimeout(r, 2000));
         }
         
         results.push({ id: userId, handle, score, req: requirement });
@@ -430,16 +460,14 @@ client.on('messageCreate', async message => {
 
     const channelId = getSetting('channel_id');
     
-    // Check if message is in raid channel
     if (channelId && message.channel.id === channelId) {
         const user = getUser(message.author.id);
         
-        // BULK LINK REGEX (Finds all links in message)
+        // Regex to find all URLs
         const urlRegex = /(?:x|twitter)\.com\/(?:[a-zA-Z0-9_]+\/status\/|i\/status\/)(\d+)/g;
         const matches = [...message.content.matchAll(urlRegex)];
 
         if (matches.length > 0) {
-            // Check if user is registered (unless Test Mode allows skipping, but safer to keep)
             if (!user) {
                 try {
                     await message.delete();
@@ -450,49 +478,38 @@ client.on('messageCreate', async message => {
             }
 
             // ==========================================
-            // TEST MODE LOGIC (Super Admins Only)
+            // SMART BULK LOGIC (ADMIN INJECTION)
             // ==========================================
             const isTestModeAllowed = isManualTestMode && SUPER_ADMINS.includes(message.author.id);
-
-            // Loop through all found links
+            
             let addedCount = 0;
+            let feedbackMsg = "✅ **Injected:** ";
+
             for (const match of matches) {
                 let tweetId = match[1];
-                let detectedUser = null; // The user handle inside the URL
-                const matchUser = message.content.match(/(?:x|twitter)\.com\/([a-zA-Z0-9_]+)\/status\//);
-                if (matchUser) detectedUser = matchUser[1];
-
-                // 1. Wrong Account Check
-                if (detectedUser && !isTestModeAllowed) {
-                    if (user.handle.toLowerCase() !== detectedUser.toLowerCase()) {
-                        try {
-                            await message.delete();
-                            const w = await message.channel.send(`⛔ <@${message.author.id}> **Wrong Account.** (Registered: @${user.handle})`);
-                            setTimeout(() => w.delete().catch(() => {}), 5000);
-                        } catch (e) {}
-                        return; // Stop processing this message entirely if normal mode
+                let finalDiscordId = message.author.id; // Default: Assign to sender
+                
+                // If Test Mode is ON, find the REAL owner of the tweet
+                if (isTestModeAllowed) {
+                    const twitterHandle = await getTweetAuthorHandle(tweetId);
+                    if (twitterHandle) {
+                        const dbUser = getUserByHandle(twitterHandle);
+                        if (dbUser) {
+                            finalDiscordId = dbUser.discord_id;
+                            feedbackMsg += `<@${dbUser.discord_id}> `;
+                        }
                     }
                 }
 
-                // 2. One Link Only Check
-                if (isUserInSession(message.author.id) && !isTestModeAllowed) {
-                    try {
-                        await message.delete();
-                        const w = await message.channel.send(`⚠️ <@${message.author.id}> **One link only.**`);
-                        setTimeout(() => w.delete().catch(() => {}), 5000);
-                    } catch (e) {}
-                    return;
-                }
-
-                // Add to database
-                addSessionLink(tweetId, message.author.id);
+                // Add to DB
+                addSessionLink(tweetId, finalDiscordId);
                 addedCount++;
             }
 
             if (addedCount > 0) {
                 await message.react('💎');
-                if (isTestModeAllowed && addedCount > 1) {
-                    await message.channel.send(`✅ Added ${addedCount} tweets to session.`);
+                if (isTestModeAllowed) {
+                    await message.channel.send(feedbackMsg).then(m => setTimeout(() => m.delete().catch(() => {}), 10000));
                 }
             }
         }
@@ -610,9 +627,10 @@ client.on('messageCreate', async message => {
         message.reply(`✅ Raid Channel: ${channel}`);
     }
     
+    // 🔥 ADMIN TEST TOOLS
     if (command === 'start') {
         isManualTestMode = true;
-        message.reply("🚀 **Force Open (Test Mode Enabled)**\nAdmins can paste multiple links in one message!");
+        message.reply("🚀 **Force Open...**");
         openSession(message);
     }
 
@@ -622,7 +640,7 @@ client.on('messageCreate', async message => {
     }
 
     if (command === 'forcereport') {
-        message.reply("📊 **Force Report...**");
+        message.reply("📊 **Force Report Running...**");
         generateFinalReport(message);
     }
 });
