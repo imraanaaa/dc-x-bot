@@ -603,7 +603,7 @@ client.on('messageCreate', async message => {
     // ✅ UPDATED !start to enable Test Mode
     if (command === 'start') {
         isManualTestMode = true; // Enable multi-link for admins
-        message.reply("🚀 **Force Open (Test Mode Enabled: Admins can post multiple links)**...");
+        message.reply("🚀 **Force Open**...");
         openSession(message);
     }
 
