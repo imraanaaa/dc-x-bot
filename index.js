@@ -37,7 +37,7 @@ const SUPER_ADMINS = [
 // 🔔 ROLE TO TAG
 const RAID_ROLE_ID = "1455184518104485950";
 
-const VERSION = "v18.2 (Test Mode + Count 45)";
+const VERSION = "v18.3 (Test Injection Command)";
 
 // 📂 DATABASE SETUP
 const DATA_DIR = fs.existsSync('/dataaa') ? '/dataaa' : './data';
@@ -77,7 +77,7 @@ const client = new Client({
 });
 
 let activeCronJobs = []; 
-let isManualTestMode = false; // Flag for !start testing
+let isManualTestMode = false;
 
 // ==========================================
 // 💾 DATABASE HELPERS
@@ -152,7 +152,6 @@ async function getNumericId(username) {
     return null;
 }
 
-// ✅ UPDATED checkReplies (Count 45 + V2 Support)
 async function checkReplies(userNumericId, targetTweetIds) {
     if (!userNumericId || !RAPID_API_KEY) return 0;
 
@@ -162,10 +161,9 @@ async function checkReplies(userNumericId, targetTweetIds) {
     let matches = 0;
     let nextToken = null;
     const maxPages = 16;
-    const countPerPage = 45; // ✅ Changed from 50 to 45
+    const countPerPage = 45;
 
     for (let i = 0; i < maxPages; i++) {
-        // Small delay to prevent 429 Rate Limits
         if (i > 0) await new Promise(resolve => setTimeout(resolve, 100));
 
         const options = {
@@ -183,11 +181,9 @@ async function checkReplies(userNumericId, targetTweetIds) {
             const response = await axios.request(options);
             const foundIds = new Set();
 
-            // 1. Check for V1.1 / Legacy Keys
             findValuesByKey(response.data, 'in_reply_to_status_id_str', Array.from(foundIds)).forEach(id => foundIds.add(String(id)));
             findValuesByKey(response.data, 'in_reply_to_status_id', Array.from(foundIds)).forEach(id => foundIds.add(String(id)));
 
-            // 2. Check for V2 'referenced_tweets' Structure
             const deepSearch = (obj) => {
                 if (Array.isArray(obj)) {
                     obj.forEach(item => deepSearch(item));
@@ -200,12 +196,10 @@ async function checkReplies(userNumericId, targetTweetIds) {
             };
             deepSearch(response.data);
 
-            // Match against targets
             for (const id of foundIds) {
                 if (targetSet.has(id)) matches++;
             }
 
-            // --- FIND CURSOR FOR NEXT PAGE ---
             const cursors = findValuesByKey(response.data, 'cursor');
             if (cursors.length > 0) {
                 nextToken = cursors[cursors.length - 1];
@@ -216,7 +210,7 @@ async function checkReplies(userNumericId, targetTweetIds) {
         } catch (e) {
             console.error(`❌ API Reply Error for user ${userNumericId}: ${e.message}`);
             if (e.response && e.response.status === 429) {
-                console.warn(`⚠️ Rate Limit Hit. Stopping check for this user to prevent errors.`);
+                console.warn(`⚠️ Rate Limit Hit. Stopping check for this user.`);
             }
             break;
         }
@@ -255,6 +249,7 @@ async function openSession(triggerMsg = null) {
 
 Session is now open! Please post your Elite tweets.
 One link per person.
+ ${isManualTestMode ? "\n💡 **Admins:** Use `!test <link> <@user>` to simulate other users!" : ""}
 
 <@&${RAID_ROLE_ID}>
     `;
@@ -274,7 +269,6 @@ async function closeSessionOnly(triggerMsg = null) {
         if (triggerMsg) triggerMsg.reply("❌ Permission Error: Cannot lock.");
     }
 
-    // ✅ Disable Test Mode on close
     isManualTestMode = false; 
 
     const sessionData = getSessionLinks();
@@ -433,6 +427,50 @@ client.on('messageCreate', async message => {
     if (message.author.bot) return;
 
     const channelId = getSetting('channel_id');
+    
+    // ==========================================
+    // 🧪 NEW !test COMMAND (FOR ADMIN SIMULATION)
+    // ==========================================
+    if (message.content.startsWith('!test')) {
+        // Only Super Admins can use this
+        if (!SUPER_ADMINS.includes(message.author.id)) return;
+
+        const args = message.content.trim().split(/\s+/);
+        if (args.length < 3) return message.reply("Usage: `!test <link> <@user>`");
+
+        const link = args[1];
+        const mention = args[2];
+
+        // Extract Tweet ID
+        const match = link.match(/(?:x|twitter)\.com\/([a-zA-Z0-9_]+)\/status\/(\d+)/);
+        const matchMobile = link.match(/(?:x|twitter)\.com\/i\/status\/(\d+)/);
+
+        let tweetId = null;
+        if (match) tweetId = match[2];
+        else if (matchMobile) tweetId = matchMobile[1];
+
+        if (!tweetId) return message.reply("❌ Invalid Tweet Link");
+
+        // Get User from Mention
+        const targetUser = message.mentions.users.first();
+        if (!targetUser) return message.reply("❌ Could not find user. Did you @mention them?");
+
+        // Check if user is registered
+        const dbUser = getUser(targetUser.id);
+        if (!dbUser) return message.reply(`❌ <@${targetUser.id}> is not registered in the database.`);
+
+        // Inject into session
+        addSessionLink(tweetId, targetUser.id);
+        
+        // React to original message
+        try { await message.react('💉'); } catch {}
+
+        return message.reply(`✅ **Test Injection:** Added tweet for <@${targetUser.id}> (@${dbUser.handle}) to the session.`);
+    }
+
+    // ==========================================
+    // 📝 NORMAL LINK LISTENER
+    // ==========================================
     if (channelId && message.channel.id === channelId) {
         const match = message.content.match(/(?:x|twitter)\.com\/([a-zA-Z0-9_]+)\/status\/(\d+)/);
         const matchMobile = message.content.match(/(?:x|twitter)\.com\/i\/status\/(\d+)/); 
@@ -466,12 +504,11 @@ client.on('messageCreate', async message => {
                 return;
             }
 
-            // ✅ TEST MODE CHECK: Allow Super Admins to post many links
+            // Check duplicates
             if (isUserInSession(message.author.id)) {
-                // If Test Mode is ON and User is Super Admin, allow pass-through (updates the link)
+                // If Test Mode is ON and User is Super Admin, allow update
                 if (isManualTestMode && SUPER_ADMINS.includes(message.author.id)) {
                     console.log(`[TEST MODE] Admin ${message.author.id} updated their link.`);
-                    // Continue to addSessionLink below
                 } else {
                     // Standard Error
                     try {
@@ -488,6 +525,9 @@ client.on('messageCreate', async message => {
         }
     }
 
+    // ==========================================
+    // ⚙️ ADMIN COMMANDS
+    // ==========================================
     if (!message.content.startsWith('!')) return;
     const args = message.content.slice(1).trim().split(/ +/);
     const command = args.shift().toLowerCase();
@@ -500,7 +540,6 @@ client.on('messageCreate', async message => {
     }
     if (!isAdmin) return; 
 
-    // ADMIN COMMANDS
     if (command === 'settime') {
         const hourOptions = [];
         for (let i = 0; i < 24; i++) {
@@ -536,7 +575,7 @@ client.on('messageCreate', async message => {
         const allUsers = db.prepare('SELECT * FROM users').all();
         if (allUsers.length === 0) return message.reply({ content: "❌ No users are currently registered." });
 
-        const itemsPerPage = 5; // ✅ Changed from 15 to 5
+        const itemsPerPage = 5;
         let currentPage = 0;
         const totalPages = Math.ceil(allUsers.length / itemsPerPage);
 
@@ -600,14 +639,12 @@ client.on('messageCreate', async message => {
         message.reply(`✅ Raid Channel: ${channel}`);
     }
     
-    // ✅ UPDATED !start to enable Test Mode
     if (command === 'start') {
-        isManualTestMode = true; // Enable multi-link for admins
-        message.reply("🚀 **Force Open**...");
+        isManualTestMode = true;
+        message.reply("🚀 **Force Open...**");
         openSession(message);
     }
 
-    // ✅ UPDATED !end to disable Test Mode
     if (command === 'end' || command === 'close') {
         message.reply("🔒 **Force Close...**");
         closeSessionOnly(message);
