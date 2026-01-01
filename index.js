@@ -31,10 +31,10 @@ const SUPER_ADMINS = [
     "627327810079424533"   // Admin 3
 ];
 
-// 🔔 ROLE TO TAG
+// 🔔 ROLE TO TAG (For Lock/Unlock)
 const RAID_ROLE_ID = "1455184518104485950";
 
-const VERSION = "v18.7 (Ghost Injection Fix)";
+const VERSION = "v19.2 (Smart Admin Injection)";
 
 // 📂 DATABASE SETUP
 const DATA_DIR = fs.existsSync('/dataaa') ? '/dataaa' : './data';
@@ -75,7 +75,6 @@ const client = new Client({
 });
 
 let activeCronJobs = []; 
-let isManualTestMode = false;
 
 // ==========================================
 // 💾 DATABASE HELPERS
@@ -85,7 +84,6 @@ function getUser(discordId) {
 }
 
 function getUserByHandle(handle) {
-    // FIX 1: Case-insensitive lookup so Ugamerzzone911 matches ugamerzzone911
     return db.prepare('SELECT * FROM users WHERE LOWER(handle) = LOWER(?)').get(handle);
 }
 
@@ -116,7 +114,7 @@ function clearSession() {
 }
 
 // ==========================================
-// 📡 API ENGINE (With Retry Logic)
+// 📡 API ENGINE (High Accuracy)
 // ==========================================
 function findValuesByKey(obj, key, list = []) {
     if (!obj) return list;
@@ -181,7 +179,7 @@ async function checkReplies(userNumericId, targetTweetIds) {
     const countPerPage = 45;
 
     for (let i = 0; i < maxPages; i++) {
-        if (i > 0) await new Promise(resolve => setTimeout(resolve, 500));
+        if (i > 0) await new Promise(resolve => setTimeout(resolve, 800));
 
         const options = {
             method: 'GET',
@@ -226,9 +224,9 @@ async function checkReplies(userNumericId, targetTweetIds) {
 
         } catch (e) {
             if (e.response && e.response.status === 429) {
-                console.warn(`⚠️ Rate Limit Hit for user ${userNumericId}. Waiting 5s...`);
+                console.warn(`⚠️ Rate Limit Hit for user ${userNumericId}. Retrying in 5s...`);
                 await new Promise(r => setTimeout(r, 5000));
-                i--;
+                i--; // Retry this page
                 continue;
             }
             console.error(`❌ API Reply Error for user ${userNumericId}: ${e.message}`);
@@ -258,17 +256,17 @@ async function openSession(triggerMsg = null) {
     if (!channel) return triggerMsg?.reply("❌ Channel Not Found.");
 
     try {
-        await channel.permissionOverwrites.edit(channel.guild.roles.everyone, { SendMessages: true });
+        await channel.permissionOverwrites.edit(RAID_ROLE_ID, { SendMessages: true });
     } catch (e) {
-        if (triggerMsg) triggerMsg.reply("❌ Permission Error: Cannot unlock.");
+        if (triggerMsg) triggerMsg.reply("❌ Permission Error: Cannot unlock role.");
         return;
     }
 
     const msg = `
-🟢 **CHANNEL OPENED**${isManualTestMode ? " **(TEST MODE)**" : ""}
+🟢 **CHANNEL OPENED**
 
 Session is now open! Please post your Elite tweets.
- ${isManualTestMode ? "🧪 **SMART INJECTION ACTIVE:** Admins can paste multiple links. The bot will assign them to owners or Ghosts." : "One link per person."}
+One link per person.
 
 <@&${RAID_ROLE_ID}>
     `;
@@ -283,12 +281,10 @@ async function closeSessionOnly(triggerMsg = null) {
     if (!channel) return triggerMsg?.reply("❌ Channel Not Found.");
 
     try {
-        await channel.permissionOverwrites.edit(channel.guild.roles.everyone, { SendMessages: false });
+        await channel.permissionOverwrites.edit(RAID_ROLE_ID, { SendMessages: false });
     } catch (e) {
-        if (triggerMsg) triggerMsg.reply("❌ Permission Error: Cannot lock.");
+        if (triggerMsg) triggerMsg.reply("❌ Permission Error: Cannot lock role.");
     }
-
-    isManualTestMode = false; 
 
     const sessionData = getSessionLinks();
     const reportTime = Math.floor((Date.now() / 1000) + (2 * 60 * 60));
@@ -316,28 +312,24 @@ async function generateFinalReport(triggerMsg = null) {
     const sessionData = getSessionLinks();
     if (sessionData.length === 0) return channel.send("⚠️ **No links posted.**");
 
-    await channel.send(`⏳ **Analyzing ${sessionData.length} participants...** (This may take a moment)`);
+    await channel.send(`⏳ **Checking ${sessionData.length} participants...**`);
 
     const allTargets = sessionData.map(r => r.tweet_id);
     const results = [];
     const uniqueUsers = new Set(sessionData.map(r => r.discord_id));
 
-    // Process users
     for (let userId of uniqueUsers) {
         let user = getUser(userId);
         let score = 0;
         let handle = "Unknown";
         let isGhost = false;
 
-        // FIX 3: Detect Ghost Users (unregistered accounts found during Injection)
+        // INTERNAL LOGIC: If ID starts with ghost:, it was an admin injection.
         if (userId.startsWith('ghost:')) {
             isGhost = true;
-            handle = userId.split(':')[1]; // Extract twitter handle from ghost ID
+            handle = userId.split(':')[1];
         } else if (user) {
             handle = user.handle;
-        } else {
-            // Should not happen for registered users, but fallback
-            handle = "Unknown";
         }
         
         const userLinks = sessionData.filter(r => r.discord_id === userId).map(r => r.tweet_id);
@@ -346,7 +338,6 @@ async function generateFinalReport(triggerMsg = null) {
         let requirement = targetsForThisUser.length; 
         if (requirement === 0) requirement = 1;
 
-        // Only check replies for REAL users who have a numeric_id
         if (!isGhost && user && user.numeric_id) {
             score = await checkReplies(user.numeric_id, targetsForThisUser);
             if (score > requirement) score = requirement;
@@ -359,7 +350,6 @@ async function generateFinalReport(triggerMsg = null) {
     results.sort((a, b) => b.score - a.score);
 
     const dateStr = new Date().toISOString().split('T')[0];
-
     let completedList = "";
     let incompleteList = "";
 
@@ -367,7 +357,6 @@ async function generateFinalReport(triggerMsg = null) {
         let pct = Math.floor((p.score / p.req) * 100);
         if (pct > 100) pct = 100;
 
-        // Format display name. If ghost, show handle only.
         let displayName = p.isGhost ? `👻 @${p.handle}` : `<@${p.id}> (@${p.handle})`;
 
         if (pct >= 100) {
@@ -385,7 +374,6 @@ async function generateFinalReport(triggerMsg = null) {
 📈 STATISTICS
 ▸ Total tweets checked: ${allTargets.length}
 ▸ Total senders: ${results.length}
-▸ Self-reply: Not required
 
 🔍 REPLY STATUS
 ✅ Fully replied:${completedList || "\n  (None)"}
@@ -395,14 +383,6 @@ async function generateFinalReport(triggerMsg = null) {
 ═════════════════════════════════════
 
 <@&${RAID_ROLE_ID}>
-
-💡 NOTE:
-If your account is detected as not fully replying even though you've replied to all:
-1️⃣ Check if your account is ghost banned (shadowbanned)
-2️⃣ If not ghost banned, it means you didn't actually raid that tweet
-3️⃣ Make sure your reply appears on others' timeline, not just on your profile
-
-⚠️ If you have any issues, make sure to report to admins to avoid getting WARN role!
 `;
 
     if (report.length > 1900) {
@@ -414,7 +394,7 @@ If your account is detected as not fully replying even though you've replied to 
 }
 
 // ==========================================
-// ⏰ SCHEDULER (Unchanged)
+// ⏰ SCHEDULER
 // ==========================================
 function rescheduleCrons() {
     activeCronJobs.forEach(job => job.stop());
@@ -465,9 +445,9 @@ client.on('messageCreate', async message => {
 
     const channelId = getSetting('channel_id');
     
+    // TRACKING LOGIC (For Users)
     if (channelId && message.channel.id === channelId) {
         const user = getUser(message.author.id);
-        
         const urlRegex = /(?:x|twitter)\.com\/(?:[a-zA-Z0-9_]+\/status\/|i\/status\/)(\d+)/g;
         const matches = [...message.content.matchAll(urlRegex)];
 
@@ -481,61 +461,68 @@ client.on('messageCreate', async message => {
                 return;
             }
 
-            // ==========================================
-            // SMART BULK LOGIC (ADMIN INJECTION)
-            // ==========================================
-            const isTestModeAllowed = isManualTestMode && SUPER_ADMINS.includes(message.author.id);
-            
             let addedCount = 0;
-            let feedbackMsg = "✅ **Injected:** ";
+            const isAdmin = SUPER_ADMINS.includes(message.author.id);
 
             for (const match of matches) {
                 let tweetId = match[1];
-                let finalDiscordId = message.author.id; // Default: Assign to sender
+                let finalDiscordId = message.author.id; 
                 
-                if (isTestModeAllowed) {
+                // 🧠 SMART ADMIN INJECTION (Silent)
+                // If an admin pastes a link, we check if it belongs to someone else.
+                if (isAdmin) {
                     const twitterHandle = await getTweetAuthorHandle(tweetId);
                     if (twitterHandle) {
                         const dbUser = getUserByHandle(twitterHandle);
                         if (dbUser) {
                             finalDiscordId = dbUser.discord_id;
-                            feedbackMsg += `<@${dbUser.discord_id}> `;
                         } else {
-                            // FIX 2: Create Ghost ID for unregistered users so they don't map to Admin
                             finalDiscordId = `ghost:${twitterHandle.toLowerCase()}`;
-                            feedbackMsg += `👻@${twitterHandle} `;
                         }
                     }
                 }
 
-                // Add to DB
                 addSessionLink(tweetId, finalDiscordId);
                 addedCount++;
             }
 
             if (addedCount > 0) {
                 await message.react('💎');
-                if (isTestModeAllowed) {
-                    await message.channel.send(feedbackMsg).then(m => setTimeout(() => m.delete().catch(() => {}), 10000));
-                }
             }
         }
     }
 
-    // COMMANDS
+    // COMMAND LOGIC (Strictly Admin Only)
     if (!message.content.startsWith('!')) return;
-    const args = message.content.slice(1).trim().split(/ +/);
-    const command = args.shift().toLowerCase();
-
+    
     let isAdmin = SUPER_ADMINS.includes(message.author.id);
     if (!isAdmin) {
         const roleId = getSetting('admin_role_id');
         if (roleId && message.member.roles.cache.has(roleId)) isAdmin = true;
         if (message.member.permissions.has('Administrator')) isAdmin = true;
     }
+
+    // 🛑 STOP if not admin
     if (!isAdmin) return; 
 
-    // ... (Existing commands like settime, listusers, register unchanged) ...
+    const args = message.content.slice(1).trim().split(/ +/);
+    const command = args.shift().toLowerCase();
+
+    // HELP COMMAND
+    if (command === 'help') {
+        const embed = new EmbedBuilder()
+            .setColor('#3498db')
+            .setTitle('🛡️ Admin Command Center')
+            .setDescription('Only admins can execute these commands.')
+            .addFields(
+                { name: '🕹️ Session Control', value: '`!start` - Force Open Session\n`!close` - Force Close Session\n`!forcereport` - Run Report Now' },
+                { name: '👥 User Management', value: '`!register @user @handle` - Link user manually\n`!listusers` - View database' },
+                { name: '⚙️ Config', value: '`!settime` - Set schedule\n`!setchannel #channel` - Set raid channel' }
+            );
+        return message.reply({ embeds: [embed] });
+    }
+
+    // ... (Existing commands) ...
     if (command === 'settime') {
         const hourOptions = [];
         for (let i = 0; i < 24; i++) {
@@ -635,20 +622,18 @@ client.on('messageCreate', async message => {
         message.reply(`✅ Raid Channel: ${channel}`);
     }
     
-    // 🔥 ADMIN TEST TOOLS
     if (command === 'start') {
-        isManualTestMode = true;
-        message.reply("🚀 **Force Open (Smart Injection Mode)**\nPaste links from ANY registered account. The bot will find and assign them!");
+        message.reply("🚀 **Session Force Opened**");
         openSession(message);
     }
 
     if (command === 'end' || command === 'close') {
-        message.reply("🔒 **Force Close...**");
+        message.reply("🔒 **Session Force Closed**");
         closeSessionOnly(message);
     }
 
     if (command === 'forcereport') {
-        message.reply("📊 **Force Report Running...**");
+        message.reply("📊 **Generating Report...**");
         generateFinalReport(message);
     }
 });
