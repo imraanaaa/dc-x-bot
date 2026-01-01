@@ -10,7 +10,7 @@ const {
     EmbedBuilder,
     ButtonBuilder,
     ButtonStyle,
-    ModalBuilder,        // Left in case you add features later
+    ModalBuilder,
     TextInputBuilder,
     TextInputStyle 
 } = require('discord.js');
@@ -37,7 +37,7 @@ const SUPER_ADMINS = [
 // 🔔 ROLE TO TAG
 const RAID_ROLE_ID = "1455184518104485950";
 
-const VERSION = "v18.0 (OG Text Format)";
+const VERSION = "v18.2 (Test Mode + Count 45)";
 
 // 📂 DATABASE SETUP
 const DATA_DIR = fs.existsSync('/dataaa') ? '/dataaa' : './data';
@@ -77,6 +77,7 @@ const client = new Client({
 });
 
 let activeCronJobs = []; 
+let isManualTestMode = false; // Flag for !start testing
 
 // ==========================================
 // 💾 DATABASE HELPERS
@@ -151,41 +152,53 @@ async function getNumericId(username) {
     return null;
 }
 
+// ✅ UPDATED checkReplies (Count 45 + V2 Support)
 async function checkReplies(userNumericId, targetTweetIds) {
     if (!userNumericId || !RAPID_API_KEY) return 0;
 
-    // Convert targets to Set for faster matching
     const targetSet = new Set(targetTweetIds);
     if (targetSet.size === 0) return 0;
 
     let matches = 0;
     let nextToken = null;
-    const maxPages = 16; // Loop 16 times
-    const countPerPage = 50; // 50 tweets per request
+    const maxPages = 16;
+    const countPerPage = 45; // ✅ Changed from 50 to 45
 
     for (let i = 0; i < maxPages; i++) {
+        // Small delay to prevent 429 Rate Limits
+        if (i > 0) await new Promise(resolve => setTimeout(resolve, 100));
+
         const options = {
             method: 'GET',
             url: `https://${RAPID_HOST}/user-replies-v2`,
             params: { 
                 user: userNumericId, 
-                count: String(countPerPage) 
+                count: String(countPerPage),
+                ...(nextToken && { cursor: nextToken }) 
             },
             headers: { 'x-rapidapi-key': RAPID_API_KEY, 'x-rapidapi-host': RAPID_HOST }
         };
-
-        // Add cursor token if we are on page 2+
-        if (nextToken) {
-            options.params.cursor = nextToken;
-        }
 
         try {
             const response = await axios.request(options);
             const foundIds = new Set();
 
-            // Collect all replies this user made in this page
+            // 1. Check for V1.1 / Legacy Keys
             findValuesByKey(response.data, 'in_reply_to_status_id_str', Array.from(foundIds)).forEach(id => foundIds.add(String(id)));
             findValuesByKey(response.data, 'in_reply_to_status_id', Array.from(foundIds)).forEach(id => foundIds.add(String(id)));
+
+            // 2. Check for V2 'referenced_tweets' Structure
+            const deepSearch = (obj) => {
+                if (Array.isArray(obj)) {
+                    obj.forEach(item => deepSearch(item));
+                } else if (typeof obj === 'object' && obj !== null) {
+                    if (obj.type === 'replied_to' && obj.id) {
+                        foundIds.add(String(obj.id));
+                    }
+                    Object.values(obj).forEach(val => deepSearch(val));
+                }
+            };
+            deepSearch(response.data);
 
             // Match against targets
             for (const id of foundIds) {
@@ -194,18 +207,17 @@ async function checkReplies(userNumericId, targetTweetIds) {
 
             // --- FIND CURSOR FOR NEXT PAGE ---
             const cursors = findValuesByKey(response.data, 'cursor');
-            
             if (cursors.length > 0) {
                 nextToken = cursors[cursors.length - 1];
             } else {
-                // No more tweets found, stop the loop early
                 break;
             }
 
         } catch (e) {
-            console.error(`❌ API Reply Error: ${e.message}`);
-            // Continue to next page or break? 
-            // If one page fails, we assume the rest might fail, so break.
+            console.error(`❌ API Reply Error for user ${userNumericId}: ${e.message}`);
+            if (e.response && e.response.status === 429) {
+                console.warn(`⚠️ Rate Limit Hit. Stopping check for this user to prevent errors.`);
+            }
             break;
         }
     }
@@ -214,7 +226,7 @@ async function checkReplies(userNumericId, targetTweetIds) {
 }
 
 // ==========================================
-// 📅 SESSION MANAGERS (TEXT MODE)
+// 📅 SESSION MANAGERS
 // ==========================================
 async function sendWarning() {
     const channelId = getSetting('channel_id');
@@ -239,7 +251,7 @@ async function openSession(triggerMsg = null) {
     }
 
     const msg = `
-🟢 **CHANNEL OPENED**
+🟢 **CHANNEL OPENED**${isManualTestMode ? " **(TEST MODE)**" : ""}
 
 Session is now open! Please post your Elite tweets.
 One link per person.
@@ -262,9 +274,10 @@ async function closeSessionOnly(triggerMsg = null) {
         if (triggerMsg) triggerMsg.reply("❌ Permission Error: Cannot lock.");
     }
 
+    // ✅ Disable Test Mode on close
+    isManualTestMode = false; 
+
     const sessionData = getSessionLinks();
-    
-    // Calculate 2 hours from now
     const reportTime = Math.floor((Date.now() / 1000) + (2 * 60 * 60));
 
     const msg = `
@@ -292,18 +305,15 @@ async function generateFinalReport(triggerMsg = null) {
 
     await channel.send(`⏳ **Analyzing ${sessionData.length} participants...**`);
 
-    // 1. Get List of all Tweet IDs
     const allTargets = sessionData.map(r => r.tweet_id);
     const results = [];
     const uniqueUsers = new Set(sessionData.map(r => r.discord_id));
 
-    // 2. Check each user
     for (let userId of uniqueUsers) {
         let user = getUser(userId);
         let score = 0;
         let handle = user ? user.handle : "Unknown";
         
-        // FIND USER'S OWN LINK TO IGNORE
         const userOwnLink = sessionData.find(r => r.discord_id === userId)?.tweet_id;
         const targetsForThisUser = allTargets.filter(id => id !== userOwnLink);
         
@@ -329,7 +339,6 @@ async function generateFinalReport(triggerMsg = null) {
         let pct = Math.floor((p.score / p.req) * 100);
         if (pct > 100) pct = 100;
 
-        // OG Text Format
         if (pct >= 100) {
             completedList += `\n  ▸ <@${p.id}> (@${p.handle}) — ${p.score}/${p.req} (100%)`;
         } else {
@@ -456,14 +465,24 @@ client.on('messageCreate', async message => {
                 } catch (e) {}
                 return;
             }
+
+            // ✅ TEST MODE CHECK: Allow Super Admins to post many links
             if (isUserInSession(message.author.id)) {
-                try {
-                    await message.delete();
-                    const w = await message.channel.send(`⚠️ <@${message.author.id}> **One link only.**`);
-                    setTimeout(() => w.delete().catch(() => {}), 5000);
-                } catch (e) {}
-                return;
+                // If Test Mode is ON and User is Super Admin, allow pass-through (updates the link)
+                if (isManualTestMode && SUPER_ADMINS.includes(message.author.id)) {
+                    console.log(`[TEST MODE] Admin ${message.author.id} updated their link.`);
+                    // Continue to addSessionLink below
+                } else {
+                    // Standard Error
+                    try {
+                        await message.delete();
+                        const w = await message.channel.send(`⚠️ <@${message.author.id}> **One link only.**`);
+                        setTimeout(() => w.delete().catch(() => {}), 5000);
+                    } catch (e) {}
+                    return;
+                }
             }
+
             addSessionLink(tweetId, message.author.id);
             await message.react('💎');
         }
@@ -515,26 +534,17 @@ client.on('messageCreate', async message => {
 
     if (command === 'listusers') {
         const allUsers = db.prepare('SELECT * FROM users').all();
+        if (allUsers.length === 0) return message.reply({ content: "❌ No users are currently registered." });
 
-        if (allUsers.length === 0) {
-            return message.reply({ content: "❌ No users are currently registered." });
-        }
-
-        // Pagination Settings
-        const itemsPerPage = 15; // How many users per page
+        const itemsPerPage = 5; // ✅ Changed from 15 to 5
         let currentPage = 0;
         const totalPages = Math.ceil(allUsers.length / itemsPerPage);
 
-        // Helper function to generate the embed for a specific page
         const generateEmbed = (page) => {
             const start = page * itemsPerPage;
             const end = start + itemsPerPage;
             const pageData = allUsers.slice(start, end);
-
-            const userListString = pageData.map(u => {
-                return `<@${u.discord_id}> — [@${u.handle}](https://x.com/${u.handle})`;
-            }).join('\n');
-
+            const userListString = pageData.map(u => `<@${u.discord_id}> — [@${u.handle}](https://x.com/${u.handle})`).join('\n');
             return new EmbedBuilder()
                 .setTitle('📋 Registered Database')
                 .setDescription(userListString)
@@ -543,61 +553,27 @@ client.on('messageCreate', async message => {
                 .setTimestamp();
         };
 
-        // Create the buttons (Grey = ButtonStyle.Secondary)
         const getButtons = (page) => {
             return new ActionRowBuilder().addComponents(
-                new ButtonBuilder()
-                    .setCustomId('prev_page')
-                    .setLabel('Previous')
-                    .setStyle(ButtonStyle.Secondary) // Grey
-                    .setDisabled(page === 0),
-                new ButtonBuilder()
-                    .setCustomId('next_page')
-                    .setLabel('Next')
-                    .setStyle(ButtonStyle.Secondary) // Grey
-                    .setDisabled(page === totalPages - 1)
+                new ButtonBuilder().setCustomId('prev_page').setLabel('Previous').setStyle(ButtonStyle.Secondary).setDisabled(page === 0),
+                new ButtonBuilder().setCustomId('next_page').setLabel('Next').setStyle(ButtonStyle.Secondary).setDisabled(page === totalPages - 1)
             );
         };
 
-        // Send the first message
-        const msg = await message.reply({ 
-            embeds: [generateEmbed(currentPage)], 
-            components: [getButtons(currentPage)] 
-        });
-
-        // Collector to handle button clicks
-        const collector = msg.createMessageComponentCollector({ time: 60000 }); // 60 seconds timeout
+        const msg = await message.reply({ embeds: [generateEmbed(currentPage)], components: [getButtons(currentPage)] });
+        const collector = msg.createMessageComponentCollector({ time: 60000 });
 
         collector.on('collect', async i => {
-            // Ensure only the person who typed the command can click the buttons
-            if (i.user.id !== message.author.id) {
-                return i.reply({ content: '❌ These buttons are not for you!', ephemeral: true });
-            }
-
-            // Update page number based on button clicked
+            if (i.user.id !== message.author.id) return i.reply({ content: '❌ These buttons are not for you!', ephemeral: true });
             if (i.customId === 'prev_page') currentPage--;
             if (i.customId === 'next_page') currentPage++;
-
-            // Update the message with new embed and new button states
-            await i.update({ 
-                embeds: [generateEmbed(currentPage)], 
-                components: [getButtons(currentPage)] 
-            });
+            await i.update({ embeds: [generateEmbed(currentPage)], components: [getButtons(currentPage)] });
         });
 
-        // When time runs out, disable the buttons
         collector.on('end', async () => {
             const disabledRow = new ActionRowBuilder().addComponents(
-                new ButtonBuilder()
-                    .setCustomId('prev_page')
-                    .setLabel('Previous')
-                    .setStyle(ButtonStyle.Secondary)
-                    .setDisabled(true),
-                new ButtonBuilder()
-                    .setCustomId('next_page')
-                    .setLabel('Next')
-                    .setStyle(ButtonStyle.Secondary)
-                    .setDisabled(true)
+                new ButtonBuilder().setCustomId('prev_page').setLabel('Previous').setStyle(ButtonStyle.Secondary).setDisabled(true),
+                new ButtonBuilder().setCustomId('next_page').setLabel('Next').setStyle(ButtonStyle.Secondary).setDisabled(true)
             );
             await msg.edit({ components: [disabledRow] }).catch(() => {});
         });
@@ -618,21 +594,25 @@ client.on('messageCreate', async message => {
     }
 
     if (command === 'version') return message.reply(`🤖 Bot Version: **${VERSION}**`);
-
     if (command === 'setchannel') {
         const channel = message.mentions.channels.first();
         setSetting('channel_id', channel.id);
         message.reply(`✅ Raid Channel: ${channel}`);
     }
-
+    
+    // ✅ UPDATED !start to enable Test Mode
     if (command === 'start') {
-        message.reply("🚀 **Force Open...**");
+        isManualTestMode = true; // Enable multi-link for admins
+        message.reply("🚀 **Force Open (Test Mode Enabled: Admins can post multiple links)**...");
         openSession(message);
     }
+
+    // ✅ UPDATED !end to disable Test Mode
     if (command === 'end' || command === 'close') {
-        message.reply("🔒 **Force Close (Grace Period)...**");
+        message.reply("🔒 **Force Close...**");
         closeSessionOnly(message);
     }
+
     if (command === 'forcereport') {
         message.reply("📊 **Force Report...**");
         generateFinalReport(message);
