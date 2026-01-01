@@ -8,8 +8,8 @@ const {
     StringSelectMenuBuilder,
     StringSelectMenuOptionBuilder,
     EmbedBuilder,
-    ButtonBuilder,     // <--- ADD THIS
-    ButtonStyle        // <--- ADD THIS
+    ButtonBuilder,
+    ButtonStyle
 } = require('discord.js');
 const axios = require('axios');
 const Database = require('better-sqlite3');
@@ -150,33 +150,64 @@ async function getNumericId(username) {
 
 async function checkReplies(userNumericId, targetTweetIds) {
     if (!userNumericId || !RAPID_API_KEY) return 0;
-    
-    // API Call
-    let fetchCount = 480; 
-    const options = {
-        method: 'GET',
-        url: `https://${RAPID_HOST}/user-replies-v2`,
-        params: { user: userNumericId, count: String(fetchCount) },
-        headers: { 'x-rapidapi-key': RAPID_API_KEY, 'x-rapidapi-host': RAPID_HOST }
-    };
 
-    try {
-        const response = await axios.request(options);
-        const foundIds = new Set();
-        // Collect all replies this user made
-        findValuesByKey(response.data, 'in_reply_to_status_id_str', Array.from(foundIds)).forEach(id => foundIds.add(String(id)));
-        findValuesByKey(response.data, 'in_reply_to_status_id', Array.from(foundIds)).forEach(id => foundIds.add(String(id)));
+    // Convert targets to Set for faster matching
+    const targetSet = new Set(targetTweetIds);
+    if (targetSet.size === 0) return 0;
 
-        // Match against targets
-        let matches = 0;
-        for (let target of targetTweetIds) {
-            if (foundIds.has(target)) matches++;
+    let matches = 0;
+    let nextToken = null;
+    const maxPages = 16; // Loop 16 times
+    const countPerPage = 50; // 50 tweets per request
+
+    for (let i = 0; i < maxPages; i++) {
+        const options = {
+            method: 'GET',
+            url: `https://${RAPID_HOST}/user-replies-v2`,
+            params: { 
+                user: userNumericId, 
+                count: String(countPerPage) 
+            },
+            headers: { 'x-rapidapi-key': RAPID_API_KEY, 'x-rapidapi-host': RAPID_HOST }
+        };
+
+        // Add cursor token if we are on page 2+
+        if (nextToken) {
+            options.params.cursor = nextToken;
         }
-        return matches;
-    } catch (e) {
-        console.error(`❌ API Reply Error: ${e.message}`);
-        return 0;
+
+        try {
+            const response = await axios.request(options);
+            const foundIds = new Set();
+
+            // Collect all replies this user made in this page
+            findValuesByKey(response.data, 'in_reply_to_status_id_str', Array.from(foundIds)).forEach(id => foundIds.add(String(id)));
+            findValuesByKey(response.data, 'in_reply_to_status_id', Array.from(foundIds)).forEach(id => foundIds.add(String(id)));
+
+            // Match against targets
+            for (const id of foundIds) {
+                if (targetSet.has(id)) matches++;
+            }
+
+            // --- FIND CURSOR FOR NEXT PAGE ---
+            const cursors = findValuesByKey(response.data, 'cursor');
+            
+            if (cursors.length > 0) {
+                nextToken = cursors[cursors.length - 1];
+            } else {
+                // No more tweets found, stop the loop early
+                break;
+            }
+
+        } catch (e) {
+            console.error(`❌ API Reply Error: ${e.message}`);
+            // Continue to next page or break? 
+            // If one page fails, we assume the rest might fail, so break.
+            break;
+        }
     }
+
+    return matches;
 }
 
 // ==========================================
@@ -479,186 +510,9 @@ client.on('messageCreate', async message => {
         });
     }
 
-                if (command === 'checkr') {
-        // 1. Check if a user was mentioned
-        const targetUser = message.mentions.users.first();
-        if (!targetUser) return message.reply("❌ Usage: `!checkr @DiscordUser`");
+    // !checkr REMOVED AS REQUESTED
 
-        // 2. Get user data from DB
-        const user = getUser(targetUser.id);
-        if (!user) return message.reply(`❌ <@${targetUser.id}> is not registered.`);
-
-        // 3. Tell bot we are working
-        const statusMsg = await message.reply(`📡 Connecting to X API to fetch recent replies for @${user.handle}...`);
-
-        // ==========================================
-        // 🔧 LOCAL API HELPER (With Pagination Loop)
-        // ==========================================
-        const getRecentRepliesData = async (numericId) => {
-            if (!numericId || !RAPID_API_KEY) return [];
-            
-            let tweets = [];
-            let nextToken = null;
-            const maxPages = 18; // Fetch 4 pages (200 items each = 800 items total)
-
-            // Loop through pages
-            for (let i = 0; i < maxPages; i++) {
-                const options = {
-                    method: 'GET',
-                    url: `https://${RAPID_HOST}/user-replies-v2`,
-                    params: { 
-                        user: numericId, 
-                        count: '200' 
-                    }, 
-                    headers: { 'x-rapidapi-key': RAPID_API_KEY, 'x-rapidapi-host': RAPID_HOST }
-                };
-
-                // Add cursor token if we are on page 2+
-                if (nextToken) {
-                    options.params.cursor = nextToken;
-                }
-
-                try {
-                    const response = await axios.request(options);
-                    
-                    // Recursive function to find tweet objects containing text
-                    function extractTweets(obj) {
-                        if (!obj) return;
-                        if (Array.isArray(obj)) {
-                            obj.forEach(item => extractTweets(item));
-                        } else if (typeof obj === 'object') {
-                            // Check if this object looks like a Tweet Result
-                            if (obj.legacy && obj.legacy.full_text) {
-                                tweets.push({
-                                    id: obj.legacy.id_str,
-                                    text: obj.legacy.full_text,
-                                    replyTo: obj.legacy.in_reply_to_status_id_str
-                                });
-                            }
-                            // Keep digging recursively
-                            Object.values(obj).forEach(val => extractTweets(val));
-                        }
-                    }
-
-                    extractTweets(response.data);
-
-                    // --- FIND CURSOR FOR NEXT PAGE ---
-                    const cursors = findValuesByKey(response.data, 'cursor');
-                    
-                    if (cursors.length > 0) {
-                        nextToken = cursors[cursors.length - 1];
-                    } else {
-                        break; // No more pages
-                    }
-
-                } catch (e) {
-                    console.error(`❌ API Error: ${e.message}`);
-                    break; 
-                }
-            }
-            
-            return tweets; 
-        };
-
-        // 4. Fetch Data
-        const tweets = await getRecentRepliesData(user.numeric_id);
-
-        if (tweets.length === 0) {
-            return statusMsg.edit("❌ API Error: No replies found or the account is private/suspended.");
-        }
-
-        // 5. Pagination Setup
-        const itemsPerPage = 20; // Reduced from 30 to prevent hitting 4096 char limit
-        let currentPage = 0;
-        const totalPages = Math.ceil(tweets.length / itemsPerPage);
-
-        // Helper to create the embed
-        const generateEmbed = (page) => {
-            const start = page * itemsPerPage;
-            const end = start + itemsPerPage;
-            const pageData = tweets.slice(start, end);
-
-            // Format the list
-            const content = pageData.map(t => {
-                const link = `https://x.com/i/status/${t.id}`;
-                // Truncate text if it's too long (kept to 60 for cleanliness)
-                const displayText = t.text.length > 60 ? t.text.substring(0, 60) + "..." : t.text;
-                const replyTarget = t.replyTo ? `(Reply to: ${t.replyTo})` : `(Root Reply)`;
-                return `**[Link](${link})**\n"${displayText}" ${replyTarget}`;
-            }).join('\n\n');
-
-            // SAFETY CHECK: Ensure description is under 4096 chars
-            let safeContent = content;
-            if (safeContent.length > 4090) {
-                safeContent = safeContent.substring(0, 4085) + "...";
-            }
-
-            return new EmbedBuilder()
-                .setTitle(`📝 Last Replies for @${user.handle}`)
-                .setDescription(safeContent || "No data for this page.")
-                .setColor('#3498db') // Blue Embed
-                .setFooter({ text: `Page ${page + 1} / ${totalPages} | Total Replies Found: ${tweets.length}` })
-                .setTimestamp();
-        };
-
-        // Helper to create Buttons (Blue = ButtonStyle.Primary)
-        const getButtons = (page) => {
-            return new ActionRowBuilder().addComponents(
-                new ButtonBuilder()
-                    .setCustomId('prev_page')
-                    .setLabel('Previous')
-                    .setStyle(ButtonStyle.Primary) // Blue Color
-                    .setDisabled(page === 0),
-                new ButtonBuilder()
-                    .setCustomId('next_page')
-                    .setLabel('Next')
-                    .setStyle(ButtonStyle.Primary) // Blue Color
-                    .setDisabled(page === totalPages - 1)
-            );
-        };
-
-        // Edit the original status message with the embed
-        await statusMsg.edit({ 
-            content: `✅ Found **${tweets.length}** recent replies for <@${targetUser.id}>:`,
-            embeds: [generateEmbed(currentPage)], 
-            components: [getButtons(currentPage)] 
-        });
-
-        // Collector for pagination
-        const collector = statusMsg.createMessageComponentCollector({ time: 120000 }); 
-
-        collector.on('collect', async i => {
-            if (i.user.id !== message.author.id) {
-                return i.reply({ content: 'Not for you.', ephemeral: true });
-            }
-
-            if (i.customId === 'prev_page') currentPage--;
-            if (i.customId === 'next_page') currentPage++;
-
-            await i.update({ 
-                embeds: [generateEmbed(currentPage)], 
-                components: [getButtons(currentPage)] 
-            });
-        });
-
-        collector.on('end', async () => {
-            const disabledRow = new ActionRowBuilder().addComponents(
-                new ButtonBuilder()
-                    .setCustomId('prev_page')
-                    .setLabel('Previous')
-                    .setStyle(ButtonStyle.Primary)
-                    .setDisabled(true),
-                new ButtonBuilder()
-                    .setCustomId('next_page')
-                    .setLabel('Next')
-                    .setStyle(ButtonStyle.Primary)
-                    .setDisabled(true)
-            );
-            await statusMsg.edit({ components: [disabledRow] }).catch(() => {});
-        });
-    }
-
-        if (command === 'listusers') {
+    if (command === 'listusers') {
         const allUsers = db.prepare('SELECT * FROM users').all();
 
         if (allUsers.length === 0) {
