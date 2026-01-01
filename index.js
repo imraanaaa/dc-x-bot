@@ -37,7 +37,7 @@ const SUPER_ADMINS = [
 // 🔔 ROLE TO TAG
 const RAID_ROLE_ID = "1455184518104485950";
 
-const VERSION = "v18.3 (Test Injection Command)";
+const VERSION = "v18.4 (Bulk Paste Test Mode)";
 
 // 📂 DATABASE SETUP
 const DATA_DIR = fs.existsSync('/dataaa') ? '/dataaa' : './data';
@@ -210,7 +210,7 @@ async function checkReplies(userNumericId, targetTweetIds) {
         } catch (e) {
             console.error(`❌ API Reply Error for user ${userNumericId}: ${e.message}`);
             if (e.response && e.response.status === 429) {
-                console.warn(`⚠️ Rate Limit Hit. Stopping check for this user.`);
+                console.warn(`⚠️ Rate Limit Hit.`);
             }
             break;
         }
@@ -248,8 +248,7 @@ async function openSession(triggerMsg = null) {
 🟢 **CHANNEL OPENED**${isManualTestMode ? " **(TEST MODE)**" : ""}
 
 Session is now open! Please post your Elite tweets.
-One link per person.
- ${isManualTestMode ? "\n💡 **Admins:** Use `!test <link> <@user>` to simulate other users!" : ""}
+ ${isManualTestMode ? "✅ **TEST MODE ON:** Admins can paste multiple links in one message!" : "One link per person."}
 
 <@&${RAID_ROLE_ID}>
     `;
@@ -301,6 +300,8 @@ async function generateFinalReport(triggerMsg = null) {
 
     const allTargets = sessionData.map(r => r.tweet_id);
     const results = [];
+    // We group by Discord ID. If 1 Admin posts 3 links, they appear once in results.
+    // This is normal behavior, as 1 person can't reply to their own tweets from 3 different accounts easily.
     const uniqueUsers = new Set(sessionData.map(r => r.discord_id));
 
     for (let userId of uniqueUsers) {
@@ -308,8 +309,9 @@ async function generateFinalReport(triggerMsg = null) {
         let score = 0;
         let handle = user ? user.handle : "Unknown";
         
-        const userOwnLink = sessionData.find(r => r.discord_id === userId)?.tweet_id;
-        const targetsForThisUser = allTargets.filter(id => id !== userOwnLink);
+        // Filter out this user's own tweets (so they don't have to reply to themselves)
+        const userLinks = sessionData.filter(r => r.discord_id === userId).map(r => r.tweet_id);
+        const targetsForThisUser = allTargets.filter(id => !userLinks.includes(id));
         
         let requirement = targetsForThisUser.length; 
         if (requirement === 0) requirement = 1;
@@ -421,72 +423,23 @@ function rescheduleCrons() {
 }
 
 // ==========================================
-// 🛠️ COMMANDS
+// 🛠️ COMMANDS & LINKS
 // ==========================================
 client.on('messageCreate', async message => {
     if (message.author.bot) return;
 
     const channelId = getSetting('channel_id');
     
-    // ==========================================
-    // 🧪 NEW !test COMMAND (FOR ADMIN SIMULATION)
-    // ==========================================
-    if (message.content.startsWith('!test')) {
-        // Only Super Admins can use this
-        if (!SUPER_ADMINS.includes(message.author.id)) return;
-
-        const args = message.content.trim().split(/\s+/);
-        if (args.length < 3) return message.reply("Usage: `!test <link> <@user>`");
-
-        const link = args[1];
-        const mention = args[2];
-
-        // Extract Tweet ID
-        const match = link.match(/(?:x|twitter)\.com\/([a-zA-Z0-9_]+)\/status\/(\d+)/);
-        const matchMobile = link.match(/(?:x|twitter)\.com\/i\/status\/(\d+)/);
-
-        let tweetId = null;
-        if (match) tweetId = match[2];
-        else if (matchMobile) tweetId = matchMobile[1];
-
-        if (!tweetId) return message.reply("❌ Invalid Tweet Link");
-
-        // Get User from Mention
-        const targetUser = message.mentions.users.first();
-        if (!targetUser) return message.reply("❌ Could not find user. Did you @mention them?");
-
-        // Check if user is registered
-        const dbUser = getUser(targetUser.id);
-        if (!dbUser) return message.reply(`❌ <@${targetUser.id}> is not registered in the database.`);
-
-        // Inject into session
-        addSessionLink(tweetId, targetUser.id);
-        
-        // React to original message
-        try { await message.react('💉'); } catch {}
-
-        return message.reply(`✅ **Test Injection:** Added tweet for <@${targetUser.id}> (@${dbUser.handle}) to the session.`);
-    }
-
-    // ==========================================
-    // 📝 NORMAL LINK LISTENER
-    // ==========================================
+    // Check if message is in raid channel
     if (channelId && message.channel.id === channelId) {
-        const match = message.content.match(/(?:x|twitter)\.com\/([a-zA-Z0-9_]+)\/status\/(\d+)/);
-        const matchMobile = message.content.match(/(?:x|twitter)\.com\/i\/status\/(\d+)/); 
+        const user = getUser(message.author.id);
+        
+        // BULK LINK REGEX (Finds all links in message)
+        const urlRegex = /(?:x|twitter)\.com\/(?:[a-zA-Z0-9_]+\/status\/|i\/status\/)(\d+)/g;
+        const matches = [...message.content.matchAll(urlRegex)];
 
-        let tweetId = null;
-        let detectedUser = null;
-
-        if (match) {
-            detectedUser = match[1];
-            tweetId = match[2];
-        } else if (matchMobile) {
-            tweetId = match[1];
-        }
-
-        if (tweetId) {
-            const user = getUser(message.author.id);
+        if (matches.length > 0) {
+            // Check if user is registered (unless Test Mode allows skipping, but safer to keep)
             if (!user) {
                 try {
                     await message.delete();
@@ -495,22 +448,34 @@ client.on('messageCreate', async message => {
                 } catch (e) {}
                 return;
             }
-            if (detectedUser && user.handle.toLowerCase() !== detectedUser.toLowerCase()) {
-                try {
-                    await message.delete();
-                    const w = await message.channel.send(`⛔ <@${message.author.id}> **Wrong Account.** (Registered: @${user.handle})`);
-                    setTimeout(() => w.delete().catch(() => {}), 5000);
-                } catch (e) {}
-                return;
-            }
 
-            // Check duplicates
-            if (isUserInSession(message.author.id)) {
-                // If Test Mode is ON and User is Super Admin, allow update
-                if (isManualTestMode && SUPER_ADMINS.includes(message.author.id)) {
-                    console.log(`[TEST MODE] Admin ${message.author.id} updated their link.`);
-                } else {
-                    // Standard Error
+            // ==========================================
+            // TEST MODE LOGIC (Super Admins Only)
+            // ==========================================
+            const isTestModeAllowed = isManualTestMode && SUPER_ADMINS.includes(message.author.id);
+
+            // Loop through all found links
+            let addedCount = 0;
+            for (const match of matches) {
+                let tweetId = match[1];
+                let detectedUser = null; // The user handle inside the URL
+                const matchUser = message.content.match(/(?:x|twitter)\.com\/([a-zA-Z0-9_]+)\/status\//);
+                if (matchUser) detectedUser = matchUser[1];
+
+                // 1. Wrong Account Check
+                if (detectedUser && !isTestModeAllowed) {
+                    if (user.handle.toLowerCase() !== detectedUser.toLowerCase()) {
+                        try {
+                            await message.delete();
+                            const w = await message.channel.send(`⛔ <@${message.author.id}> **Wrong Account.** (Registered: @${user.handle})`);
+                            setTimeout(() => w.delete().catch(() => {}), 5000);
+                        } catch (e) {}
+                        return; // Stop processing this message entirely if normal mode
+                    }
+                }
+
+                // 2. One Link Only Check
+                if (isUserInSession(message.author.id) && !isTestModeAllowed) {
                     try {
                         await message.delete();
                         const w = await message.channel.send(`⚠️ <@${message.author.id}> **One link only.**`);
@@ -518,16 +483,22 @@ client.on('messageCreate', async message => {
                     } catch (e) {}
                     return;
                 }
+
+                // Add to database
+                addSessionLink(tweetId, message.author.id);
+                addedCount++;
             }
 
-            addSessionLink(tweetId, message.author.id);
-            await message.react('💎');
+            if (addedCount > 0) {
+                await message.react('💎');
+                if (isTestModeAllowed && addedCount > 1) {
+                    await message.channel.send(`✅ Added ${addedCount} tweets to session.`);
+                }
+            }
         }
     }
 
-    // ==========================================
-    // ⚙️ ADMIN COMMANDS
-    // ==========================================
+    // COMMANDS
     if (!message.content.startsWith('!')) return;
     const args = message.content.slice(1).trim().split(/ +/);
     const command = args.shift().toLowerCase();
@@ -641,7 +612,7 @@ client.on('messageCreate', async message => {
     
     if (command === 'start') {
         isManualTestMode = true;
-        message.reply("🚀 **Force Open...**");
+        message.reply("🚀 **Force Open (Test Mode Enabled)**\nAdmins can paste multiple links in one message!");
         openSession(message);
     }
 
