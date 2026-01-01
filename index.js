@@ -34,7 +34,7 @@ const SUPER_ADMINS = [
 // 🔔 ROLE TO TAG (For Lock/Unlock)
 const RAID_ROLE_ID = "1455184518104485950";
 
-const VERSION = "v19.3 (V1 API & Deep Scan)";
+const VERSION = "v19.4 (Session Lock & One-Link Rule)";
 
 // 📂 DATABASE SETUP
 const DATA_DIR = fs.existsSync('/dataaa') ? '/dataaa' : './data';
@@ -113,6 +113,10 @@ function clearSession() {
     db.prepare('DELETE FROM session_activity').run();
 }
 
+function isSessionOpen() {
+    return getSetting('session_status') === 'open';
+}
+
 // ==========================================
 // 📡 API ENGINE (High Accuracy)
 // ==========================================
@@ -186,7 +190,7 @@ async function checkReplies(userNumericId, targetTweetIds) {
 
         const options = {
             method: 'GET',
-            url: `https://${RAPID_HOST}/user-replies`, // CHANGED TO V1
+            url: `https://${RAPID_HOST}/user-replies`, // V1 API
             params: { 
                 user: userNumericId, 
                 count: String(countPerPage),
@@ -253,6 +257,7 @@ async function sendWarning() {
 }
 
 async function openSession(triggerMsg = null) {
+    setSetting('session_status', 'open'); // 🔓 SET STATE OPEN
     clearSession(); 
     const channelId = getSetting('channel_id');
     if (!channelId) return triggerMsg?.reply("❌ No Channel Set.");
@@ -270,7 +275,7 @@ async function openSession(triggerMsg = null) {
 🟢 **CHANNEL OPENED**
 
 Session is now open! Please post your Elite tweets.
-One link per person.
+**ONE LINK PER PERSON.**
 
 <@&${RAID_ROLE_ID}>
     `;
@@ -279,6 +284,7 @@ One link per person.
 }
 
 async function closeSessionOnly(triggerMsg = null) {
+    setSetting('session_status', 'closed'); // 🔒 SET STATE CLOSED
     const channelId = getSetting('channel_id');
     if (!channelId) return triggerMsg?.reply("❌ No Channel.");
     const channel = await client.channels.fetch(channelId).catch(() => null);
@@ -451,11 +457,18 @@ client.on('messageCreate', async message => {
     
     // TRACKING LOGIC (For Users)
     if (channelId && message.channel.id === channelId) {
-        const user = getUser(message.author.id);
         const urlRegex = /(?:x|twitter)\.com\/(?:[a-zA-Z0-9_]+\/status\/|i\/status\/)(\d+)/g;
         const matches = [...message.content.matchAll(urlRegex)];
 
         if (matches.length > 0) {
+            
+            // 🛑 CHECK: IS SESSION OPEN?
+            if (!isSessionOpen()) {
+                // Ignore tracking if session is closed.
+                return;
+            }
+
+            const user = getUser(message.author.id);
             if (!user) {
                 try {
                     await message.delete();
@@ -465,15 +478,42 @@ client.on('messageCreate', async message => {
                 return;
             }
 
+            // 👑 PERMISSIONS
+            // Check Admin logic earlier now
+            let isAdmin = SUPER_ADMINS.includes(message.author.id);
+            if (!isAdmin) {
+                const roleId = getSetting('admin_role_id');
+                if (roleId && message.member.roles.cache.has(roleId)) isAdmin = true;
+                if (message.member.permissions.has('Administrator')) isAdmin = true;
+            }
+
+            // 🛑 RULE: ONE LINK PER PERSON (Non-Admins)
+            if (!isAdmin) {
+                // 1. Check if trying to post multiple in one msg
+                if (matches.length > 1) {
+                    await message.delete();
+                    const w = await message.channel.send(`⚠️ <@${message.author.id}> **One link per message only.**`);
+                    setTimeout(() => w.delete().catch(() => {}), 5000);
+                    return;
+                }
+
+                // 2. Check if already posted in this session
+                const existing = db.prepare('SELECT 1 FROM session_activity WHERE discord_id = ?').get(message.author.id);
+                if (existing) {
+                    await message.delete();
+                    const w = await message.channel.send(`⚠️ <@${message.author.id}> **You have already posted a link this session!**`);
+                    setTimeout(() => w.delete().catch(() => {}), 5000);
+                    return;
+                }
+            }
+
             let addedCount = 0;
-            const isAdmin = SUPER_ADMINS.includes(message.author.id);
 
             for (const match of matches) {
                 let tweetId = match[1];
                 let finalDiscordId = message.author.id; 
                 
                 // 🧠 SMART ADMIN INJECTION (Silent)
-                // If an admin pastes a link, we check if it belongs to someone else.
                 if (isAdmin) {
                     const twitterHandle = await getTweetAuthorHandle(tweetId);
                     if (twitterHandle) {
@@ -644,6 +684,8 @@ client.on('messageCreate', async message => {
 
 client.once('ready', () => {
     console.log(`Logged in as ${client.user.tag} - ${VERSION}`);
+    // Reset session state to closed on restart to be safe, or leave it to persist
+    // setSetting('session_status', 'closed'); 
     rescheduleCrons();
 });
 
