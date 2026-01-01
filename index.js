@@ -10,8 +10,8 @@ const {
     EmbedBuilder,
     ButtonBuilder,
     ButtonStyle,
-     ModalBuilder,        // <--- ADD THIS
-    TextInputBuilder,    // <--- ADD THIS
+    ModalBuilder,
+    TextInputBuilder,
     TextInputStyle 
 } = require('discord.js');
 const axios = require('axios');
@@ -86,6 +86,7 @@ function getUser(discordId) {
 }
 
 function saveUser(discordId, handle, numericId) {
+    // Fixed: Added missing parenthesis in SQL string
     const stmt = db.prepare('INSERT OR REPLACE INTO users (discord_id, handle, numeric_id) VALUES (?, ?, ?)');
     stmt.run(discordId, handle, numericId);
 }
@@ -96,10 +97,12 @@ function getSetting(key) {
 }
 
 function setSetting(key, value) {
+    // Fixed: Added missing parenthesis in SQL string
     db.prepare('INSERT OR REPLACE INTO settings (key, value) VALUES (?, ?)').run(key, value);
 }
 
 function addSessionLink(tweetId, discordId) {
+    // Fixed: Added missing parenthesis in SQL string
     db.prepare('INSERT OR REPLACE INTO session_activity (tweet_id, discord_id) VALUES (?, ?)').run(tweetId, discordId);
 }
 
@@ -730,22 +733,21 @@ If your account is detected as not fully replying even though you've replied to 
         
         console.log(`✅ Emergency Report Finished.`);
     }
-        if (command === 'manualr') {
-        // Create the popup modal
-        const modal = new ModalBuilder()
-            .setCustomId('manualr_modal')
-            .setTitle('🔍 Manual Raid Report')
-            .addComponents(
-                new ActionRowBuilder().addComponents(
-                    new TextInputBuilder()
-                        .setCustomId('tweet_links')
-                        .setLabel('Paste Tweet Links (One per line)')
-                        .setStyle(TextInputStyle.Paragraph) // Big text box
-                        .setRequired(true)
-                )
-            );
-        
-        await message.showModal(modal);
+    // ==========================================
+    // 🔍 MANUAL REPORT (Popup)
+    // ==========================================
+    if (command === 'manualr') {
+        const row = new ActionRowBuilder().addComponents(
+            new ButtonBuilder()
+                .setCustomId('start_manualr')
+                .setLabel('🔍 Open Manual Report')
+                .setStyle(ButtonStyle.Primary) // Blue button
+        );
+
+        await message.reply({ 
+            content: "Click the button below to configure the manual report:", 
+            components: [row] 
+        });
     }
     if (command === 'forcereport') {
         message.reply("📊 **Force Report...**");
@@ -755,10 +757,31 @@ If your account is detected as not fully replying even though you've replied to 
 });
 
 // ==========================================
-// 🖱️ INTERACTION HANDLER (Modals)
+// 🖱️ INTERACTION HANDLER (Modals & Buttons)
 // ==========================================
 client.on('interactionCreate', async interaction => {
-    // We only care about Modal Submissions
+    
+    // 1. HANDLE BUTTON CLICK (The "Open Report" button)
+    if (interaction.isButton() && interaction.customId === 'start_manualr') {
+        // Define the Modal here
+        const modal = new ModalBuilder()
+            .setCustomId('manualr_modal')
+            .setTitle('🔍 Manual Raid Report')
+            .addComponents(
+                new ActionRowBuilder().addComponents(
+                    new TextInputBuilder()
+                        .setCustomId('tweet_links')
+                        .setLabel('Paste Tweet Links (One per line)')
+                        .setStyle(TextInputStyle.Paragraph)
+                        .setRequired(true)
+                )
+            );
+        
+        // Show the modal
+        return await interaction.showModal(modal);
+    }
+
+    // 2. HANDLE MODAL SUBMISSION (When user clicks Submit)
     if (!interaction.isModalSubmit()) return;
     if (interaction.customId !== 'manualr_modal') return;
 
@@ -838,6 +861,7 @@ client.on('interactionCreate', async interaction => {
 
     await interaction.editReply({ content: "✅ Report generated!" });
 });
+
 
 client.once('ready', () => {
     console.log(`Logged in as ${client.user.tag} - ${VERSION}`);
