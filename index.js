@@ -632,6 +632,101 @@ client.on('messageCreate', async message => {
         message.reply("🔒 **Force Close (Grace Period)...**");
         closeSessionOnly(message);
     }
+        // ==========================================
+    // 📊 FIX: GENERATE REPORT IN CURRENT CHANNEL
+    // ==========================================
+    if (command === 'reporthere') {
+        // Use the channel where the command was typed
+        const channel = message.channel; 
+        
+        const sessionData = getSessionLinks();
+        if (sessionData.length === 0) return channel.send("⚠️ **No links posted in current session data.**");
+
+        await channel.send(`⏳ **Analyzing ${sessionData.length} participants...**`);
+        console.log(`⏳ Starting Emergency Report for channel ${channel.id}`);
+
+        // 1. Get List of all Tweet IDs
+        const allTargets = sessionData.map(r => r.tweet_id);
+        const results = [];
+        const uniqueUsers = new Set(sessionData.map(r => r.discord_id));
+
+        // 2. Check each user
+        // Note: This uses the deep check (16 pages, 50 count) from the main function
+        for (const userId of uniqueUsers) {
+            let user = getUser(userId);
+            let score = 0;
+            let handle = user ? user.handle : "Unknown";
+            
+            // FIND USER'S OWN LINK TO IGNORE
+            const userOwnLink = sessionData.find(r => r.discord_id === userId)?.tweet_id;
+            const targetsForThisUser = allTargets.filter(id => id !== userOwnLink);
+            
+            let requirement = targetsForThisUser.length; 
+            if (requirement === 0) requirement = 1;
+
+            if (user && user.numeric_id) {
+                score = await checkReplies(user.numeric_id, targetsForThisUser);
+                if (score > requirement) score = requirement;
+            }
+            
+            results.push({ id: userId, handle, score, req: requirement });
+        }
+
+        results.sort((a, b) => b.score - a.score);
+
+        const dateStr = new Date().toISOString().split('T')[0];
+
+        let completedList = "";
+        let incompleteList = "";
+
+        for (const p of results) {
+            let pct = Math.floor((p.score / p.req) * 100);
+            if (pct > 100) pct = 100;
+
+            if (pct >= 100) {
+                completedList += `\n  ▸ <@${p.id}> (@${p.handle}) — ${p.score}/${p.req} (100%)`;
+            } else {
+                incompleteList += `\n  ▸ <@${p.id}> (@${p.handle}) — ${p.score}/${p.req} (${pct}%)`;
+            }
+        }
+
+        let report = `
+═══════════════════════════════════════
+📊 OG YAPPERS REPORT — ${dateStr}
+═══════════════════════════════════════
+
+📈 STATISTICS
+▸ Total tweets checked: ${allTargets.length}
+▸ Total senders: ${results.length}
+▸ Self-reply: Not required
+
+🔍 REPLY STATUS
+✅ Fully replied:${completedList || "\n  (None)"}
+
+❌ Not fully replied:${incompleteList || "\n  (None)"}
+
+═══════════════════════════════════════
+
+<@&${RAID_ROLE_ID}>
+
+💡 NOTE:
+If your account is detected as not fully replying even though you've replied to all:
+1️⃣ Check if your account is ghost banned (shadowbanned)
+2️⃣ If not ghost banned, it means you didn't actually raid that tweet
+3️⃣ Make sure your reply appears on others' timeline, not just on your profile
+
+⚠️ If you have any issues, make sure to report to admins to avoid getting WARN role!
+`;
+
+        if (report.length > 1900) {
+            const chunks = report.match(/[\s\S]{1,1900}/g) || [];
+            for (const chunk of chunks) await channel.send(chunk);
+        } else {
+            await channel.send(report);
+        }
+        
+        console.log(`✅ Emergency Report Finished.`);
+    }
     if (command === 'forcereport') {
         message.reply("📊 **Force Report...**");
         generateFinalReport(message);
