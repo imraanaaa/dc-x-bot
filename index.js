@@ -479,6 +479,155 @@ client.on('messageCreate', async message => {
         });
     }
 
+        if (command === 'checkr') {
+        // 1. Check if a user was mentioned
+        const targetUser = message.mentions.users.first();
+        if (!targetUser) return message.reply("❌ Usage: `!checkr @DiscordUser`");
+
+        // 2. Get user data from DB
+        const user = getUser(targetUser.id);
+        if (!user) return message.reply(`❌ <@${targetUser.id}> is not registered.`);
+
+        // 3. Tell bot we are working
+        const statusMsg = await message.reply(`📡 Connecting to X API to fetch recent replies for @${user.handle}...`);
+
+        // ==========================================
+        // 🔧 LOCAL API HELPER (Built-in, no separate paste needed)
+        // ==========================================
+        const getRecentRepliesData = async (numericId) => {
+            if (!numericId || !RAPID_API_KEY) return [];
+            
+            // Fetch last 200 tweets
+            const options = {
+                method: 'GET',
+                url: `https://${RAPID_HOST}/user-replies-v2`,
+                params: { user: numericId, count: '200' },
+                headers: { 'x-rapidapi-key': RAPID_API_KEY, 'x-rapidapi-host': RAPID_HOST }
+            };
+
+            try {
+                const response = await axios.request(options);
+                const tweets = [];
+
+                // Recursive function to find tweet objects containing text
+                function extractTweets(obj) {
+                    if (!obj) return;
+                    if (Array.isArray(obj)) {
+                        obj.forEach(i => extractTweets(i));
+                    } else if (typeof obj === 'object') {
+                        // Check if this object looks like a Tweet Result
+                        if (obj.legacy && obj.legacy.full_text) {
+                            tweets.push({
+                                id: obj.legacy.id_str,
+                                text: obj.legacy.full_text,
+                                replyTo: obj.legacy.in_reply_to_status_id_str
+                            });
+                        }
+                        // Keep digging recursively
+                        Object.values(obj).forEach(val => extractTweets(val));
+                    }
+                }
+
+                extractTweets(response.data);
+                return tweets; 
+            } catch (e) {
+                console.error(`❌ API Error: ${e.message}`);
+                return [];
+            }
+        };
+
+        // 4. Fetch Data
+        const tweets = await getRecentRepliesData(user.numeric_id);
+
+        if (tweets.length === 0) {
+            return statusMsg.edit("❌ API Error: No replies found or the account is private/suspended.");
+        }
+
+        // 5. Pagination Setup
+        const itemsPerPage = 30;
+        let currentPage = 0;
+        const totalPages = Math.ceil(tweets.length / itemsPerPage);
+
+        // Helper to create the embed
+        const generateEmbed = (page) => {
+            const start = page * itemsPerPage;
+            const end = start + itemsPerPage;
+            const pageData = tweets.slice(start, end);
+
+            // Format the list
+            const content = pageData.map(t => {
+                const link = `https://x.com/i/status/${t.id}`;
+                // Truncate text if it's too long
+                const displayText = t.text.length > 60 ? t.text.substring(0, 60) + "..." : t.text;
+                const replyTarget = t.replyTo ? `(Reply to: ${t.replyTo})` : `(Root Reply)`;
+                return `**[Link](${link})**\n"${displayText}" ${replyTarget}`;
+            }).join('\n\n');
+
+            return new EmbedBuilder()
+                .setTitle(`📝 Last Replies for @${user.handle}`)
+                .setDescription(content || "No data for this page.")
+                .setColor('#3498db') // Blue Embed
+                .setFooter({ text: `Page ${page + 1} / ${totalPages} | Total Replies Found: ${tweets.length}` })
+                .setTimestamp();
+        };
+
+        // Helper to create Buttons (Blue = ButtonStyle.Primary)
+        const getButtons = (page) => {
+            return new ActionRowBuilder().addComponents(
+                new ButtonBuilder()
+                    .setCustomId('prev_page')
+                    .setLabel('Previous')
+                    .setStyle(ButtonStyle.Primary) // Blue Color
+                    .setDisabled(page === 0),
+                new ButtonBuilder()
+                    .setCustomId('next_page')
+                    .setLabel('Next')
+                    .setStyle(ButtonStyle.Primary) // Blue Color
+                    .setDisabled(page === totalPages - 1)
+            );
+        };
+
+        // Edit the original status message with the embed
+        await statusMsg.edit({ 
+            content: `✅ Found **${tweets.length}** recent replies for <@${targetUser.id}>:`,
+            embeds: [generateEmbed(currentPage)], 
+            components: [getButtons(currentPage)] 
+        });
+
+        // Collector for pagination
+        const collector = statusMsg.createMessageComponentCollector({ time: 120000 }); // 2 min timeout
+
+        collector.on('collect', async i => {
+            if (i.user.id !== message.author.id) {
+                return i.reply({ content: 'Not for you.', ephemeral: true });
+            }
+
+            if (i.customId === 'prev_page') currentPage--;
+            if (i.customId === 'next_page') currentPage++;
+
+            await i.update({ 
+                embeds: [generateEmbed(currentPage)], 
+                components: [getButtons(currentPage)] 
+            });
+        });
+
+        collector.on('end', async () => {
+            const disabledRow = new ActionRowBuilder().addComponents(
+                new ButtonBuilder()
+                    .setCustomId('prev_page')
+                    .setLabel('Previous')
+                    .setStyle(ButtonStyle.Primary)
+                    .setDisabled(true),
+                new ButtonBuilder()
+                    .setCustomId('next_page')
+                    .setLabel('Next')
+                    .setStyle(ButtonStyle.Primary)
+                    .setDisabled(true)
+            );
+            await statusMsg.edit({ components: [disabledRow] }).catch(() => {});
+        });
+    }
+
         if (command === 'listusers') {
         const allUsers = db.prepare('SELECT * FROM users').all();
 
