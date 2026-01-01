@@ -31,7 +31,7 @@ const SUPER_ADMINS = [
 // 🔔 ROLE TO TAG
 const RAID_ROLE_ID = "1455184518104485950";
 
-const VERSION = "v19.2 (Smart Pagination / Cursor Support)";
+const VERSION = "v18.0 (OG Text Format)";
 
 // 📂 DATABASE SETUP
 const DATA_DIR = fs.existsSync('/dataaa') ? '/dataaa' : './data';
@@ -148,71 +148,32 @@ async function getNumericId(username) {
 async function checkReplies(userNumericId, targetTweetIds) {
     if (!userNumericId || !RAPID_API_KEY) return 0;
     
-    // 🔧 SMART PAGINATION LOGIC
-    // We will fetch up to 3 pages (3000 tweets max) to save requests.
-    // If we find all targets early, we stop.
-    
-    let cursor = undefined;
-    let matches = 0;
-    let pageCount = 0;
-    const maxPages = 3; // Safety limit to prevent draining free tier instantly
-    const fetchCount = 1000; // Max items per page
-
-    // Helper to get cursor value
-    const getCursor = (data) => {
-        // Try to find the cursor in common locations for Twitter APIs
-        // Usually: data.next_cursor, data.cursor, or within an instruction object
-        return findValuesByKey(data, 'cursor')[0] || findValuesByKey(data, 'next_cursor')[0];
+    // API Call
+    let fetchCount = 480; 
+    const options = {
+        method: 'GET',
+        url: `https://${RAPID_HOST}/user-replies-v2`,
+        params: { user: userNumericId, count: String(fetchCount) },
+        headers: { 'x-rapidapi-key': RAPID_API_KEY, 'x-rapidapi-host': RAPID_HOST }
     };
 
-    while (pageCount < maxPages && matches < targetTweetIds.length) {
-        const params = { 
-            user: userNumericId, 
-            count: String(fetchCount) 
-        };
+    try {
+        const response = await axios.request(options);
+        const foundIds = new Set();
+        // Collect all replies this user made
+        findValuesByKey(response.data, 'in_reply_to_status_id_str', Array.from(foundIds)).forEach(id => foundIds.add(String(id)));
+        findValuesByKey(response.data, 'in_reply_to_status_id', Array.from(foundIds)).forEach(id => foundIds.add(String(id)));
 
-        if (cursor) {
-            params.cursor = String(cursor);
+        // Match against targets
+        let matches = 0;
+        for (let target of targetTweetIds) {
+            if (foundIds.has(target)) matches++;
         }
-
-        const options = {
-            method: 'GET',
-            url: `https://${RAPID_HOST}/user-replies-v2`,
-            params: params,
-            headers: { 'x-rapidapi-key': RAPID_API_KEY, 'x-rapidapi-host': RAPID_HOST }
-        };
-
-        try {
-            const response = await axios.request(options);
-            const foundIds = new Set();
-            
-            // 1. Collect Standard Replies
-            findValuesByKey(response.data, 'in_reply_to_status_id_str', Array.from(foundIds)).forEach(id => foundIds.add(String(id)));
-            findValuesByKey(response.data, 'in_reply_to_status_id', Array.from(foundIds)).forEach(id => foundIds.add(String(id)));
-
-            // 2. Collect Quote Tweets
-            findValuesByKey(response.data, 'quoted_status_id_str', Array.from(foundIds)).forEach(id => foundIds.add(String(id)));
-            findValuesByKey(response.data, 'quoted_status_id', Array.from(foundIds)).forEach(id => foundIds.add(String(id)));
-
-            // Match against targets
-            for (let target of targetTweetIds) {
-                if (foundIds.has(target)) matches++;
-            }
-
-            // Prepare for next page
-            const nextCursor = getCursor(response.data);
-            if (!nextCursor || nextCursor === "0") break; // No more pages
-            
-            cursor = nextCursor;
-            pageCount++;
-
-        } catch (e) {
-            console.error(`❌ API Reply Error (Page ${pageCount + 1}): ${e.message}`);
-            break; // Stop if error
-        }
+        return matches;
+    } catch (e) {
+        console.error(`❌ API Reply Error: ${e.message}`);
+        return 0;
     }
-    
-    return matches;
 }
 
 // ==========================================
@@ -348,7 +309,6 @@ async function generateFinalReport(triggerMsg = null) {
 ▸ Total tweets checked: ${allTargets.length}
 ▸ Total senders: ${results.length}
 ▸ Self-reply: Not required
-▸ Smart Pagination: Enabled (Max 3 pages)
 
 🔍 REPLY STATUS
 ✅ Fully replied:${completedList || "\n  (None)"}
@@ -360,8 +320,12 @@ async function generateFinalReport(triggerMsg = null) {
 <@&${RAID_ROLE_ID}>
 
 💡 NOTE:
-Pagination is enabled. This means we check up to 3,000 tweets deep.
-If you still show 0, you have replied to >3000 tweets recently.
+If your account is detected as not fully replying even though you've replied to all:
+1️⃣ Check if your account is ghost banned (shadowbanned)
+2️⃣ If not ghost banned, it means you didn't actually raid that tweet
+3️⃣ Make sure your reply appears on others' timeline, not just on your profile
+
+⚠️ If you have any issues, make sure to report to admins to avoid getting WARN role!
 `;
 
     if (report.length > 1900) {
