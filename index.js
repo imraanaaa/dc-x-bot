@@ -479,7 +479,7 @@ client.on('messageCreate', async message => {
         });
     }
 
-        if (command === 'checkr') {
+            if (command === 'checkr') {
         // 1. Check if a user was mentioned
         const targetUser = message.mentions.users.first();
         if (!targetUser) return message.reply("❌ Usage: `!checkr @DiscordUser`");
@@ -492,58 +492,85 @@ client.on('messageCreate', async message => {
         const statusMsg = await message.reply(`📡 Connecting to X API to fetch recent replies for @${user.handle}...`);
 
         // ==========================================
-        // 🔧 LOCAL API HELPER (Built-in, no separate paste needed)
+        // 🔧 LOCAL API HELPER (With Pagination Loop)
         // ==========================================
         const getRecentRepliesData = async (numericId) => {
             if (!numericId || !RAPID_API_KEY) return [];
             
-            // Fetch last 200 tweets
-            const options = {
-                method: 'GET',
-                url: `https://${RAPID_HOST}/user-replies-v2`,
-                params: { user: numericId, count: '200' },
-                headers: { 'x-rapidapi-key': RAPID_API_KEY, 'x-rapidapi-host': RAPID_HOST }
-            };
+            let tweets = [];
+            let nextToken = null;
+            const maxPages = 4; // Fetch 4 pages (200 items each = 800 items total)
 
-            try {
-                const response = await axios.request(options);
-                const tweets = [];
+            // Loop through pages
+            for (let i = 0; i < maxPages; i++) {
+                const options = {
+                    method: 'GET',
+                    url: `https://${RAPID_HOST}/user-replies-v2`,
+                    params: { 
+                        user: numericId, 
+                        count: '200' 
+                    }, 
+                    headers: { 'x-rapidapi-key': RAPID_API_KEY, 'x-rapidapi-host': RAPID_HOST }
+                };
 
-                // Recursive function to find tweet objects containing text
-                function extractTweets(obj) {
-                    if (!obj) return;
-                    if (Array.isArray(obj)) {
-                        obj.forEach(i => extractTweets(i));
-                    } else if (typeof obj === 'object') {
-                        // Check if this object looks like a Tweet Result
-                        if (obj.legacy && obj.legacy.full_text) {
-                            tweets.push({
-                                id: obj.legacy.id_str,
-                                text: obj.legacy.full_text,
-                                replyTo: obj.legacy.in_reply_to_status_id_str
-                            });
-                        }
-                        // Keep digging recursively
-                        Object.values(obj).forEach(val => extractTweets(val));
-                    }
+                // Add cursor token if we are on page 2+
+                if (nextToken) {
+                    options.params.cursor = nextToken;
                 }
 
-                extractTweets(response.data);
-                return tweets; 
-            } catch (e) {
-                console.error(`❌ API Error: ${e.message}`);
-                return [];
+                try {
+                    const response = await axios.request(options);
+                    
+                    // Recursive function to find tweet objects containing text
+                    function extractTweets(obj) {
+                        if (!obj) return;
+                        if (Array.isArray(obj)) {
+                            obj.forEach(item => extractTweets(item));
+                        } else if (typeof obj === 'object') {
+                            // Check if this object looks like a Tweet Result
+                            if (obj.legacy && obj.legacy.full_text) {
+                                tweets.push({
+                                    id: obj.legacy.id_str,
+                                    text: obj.legacy.full_text,
+                                    replyTo: obj.legacy.in_reply_to_status_id_str
+                                });
+                            }
+                            // Keep digging recursively
+                            Object.values(obj).forEach(val => extractTweets(val));
+                        }
+                    }
+
+                    extractTweets(response.data);
+
+                    // --- FIND CURSOR FOR NEXT PAGE ---
+                    // We search the whole response for any "cursor" keys
+                    // Twitter API usually puts it in instructions. We take the last one found (bottom cursor).
+                    const cursors = findValuesByKey(response.data, 'cursor');
+                    
+                    if (cursors.length > 0) {
+                        nextToken = cursors[cursors.length - 1];
+                    } else {
+                        // No more pages, stop the loop
+                        break;
+                    }
+
+                } catch (e) {
+                    console.error(`❌ API Error: ${e.message}`);
+                    break; // Stop if there is an error
+                }
             }
+            
+            return tweets; 
         };
 
-        // 4. Fetch Data
+        // 4. Fetch Data (This will now take a bit longer as it hits API 4 times)
         const tweets = await getRecentRepliesData(user.numeric_id);
 
         if (tweets.length === 0) {
             return statusMsg.edit("❌ API Error: No replies found or the account is private/suspended.");
         }
 
-        // 5. Pagination Setup
+        // 5. Pagination Setup (For the Discord Embed)
         const itemsPerPage = 30;
         let currentPage = 0;
         const totalPages = Math.ceil(tweets.length / itemsPerPage);
