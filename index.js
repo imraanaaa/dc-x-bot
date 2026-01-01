@@ -149,7 +149,7 @@ async function checkReplies(userNumericId, targetTweetIds) {
     if (!userNumericId || !RAPID_API_KEY) return 0;
     
     // API Call
-    let fetchCount = 100; 
+    let fetchCount = 1000; 
     const options = {
         method: 'GET',
         url: `https://${RAPID_HOST}/user-replies-v2`,
