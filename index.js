@@ -34,7 +34,7 @@ const SUPER_ADMINS = [
 // 🔔 ROLE TO TAG (For Lock/Unlock)
 const RAID_ROLE_ID = "1455184518104485950";
 
-const VERSION = "v19.4 (Session Lock & One-Link Rule)";
+const VERSION = "v20.0 (V2 API + Deep Scan)";
 
 // 📂 DATABASE SETUP
 const DATA_DIR = fs.existsSync('/dataaa') ? '/dataaa' : './data';
@@ -118,7 +118,7 @@ function isSessionOpen() {
 }
 
 // ==========================================
-// 📡 API ENGINE (High Accuracy)
+// 📡 API ENGINE (V2 with Deep Scanning)
 // ==========================================
 function findValuesByKey(obj, key, list = []) {
     if (!obj) return list;
@@ -134,12 +134,20 @@ function findValuesByKey(obj, key, list = []) {
 }
 
 async function getNumericId(username) {
-    if (!RAPID_API_KEY) return console.error("❌ CRITICAL: RAPID_API_KEY missing!");
+    if (!RAPID_API_KEY) {
+        console.error("❌ CRITICAL: RAPID_API_KEY missing!");
+        return null;
+    }
+    
     const options = {
         method: 'GET',
         url: `https://${RAPID_HOST}/user`,
         params: { username: username },
-        headers: { 'x-rapidapi-key': RAPID_API_KEY, 'x-rapidapi-host': RAPID_HOST }
+        headers: { 
+            'x-rapidapi-key': RAPID_API_KEY, 
+            'x-rapidapi-host': RAPID_HOST 
+        },
+        timeout: 15000
     };
 
     try {
@@ -147,8 +155,12 @@ async function getNumericId(username) {
         let ids = findValuesByKey(response.data, 'rest_id');
         if (ids.length > 0) return ids[0];
         ids = findValuesByKey(response.data, 'id');
-        for (let id of ids) { if (!isNaN(id) && id.length > 5) return id; }
-    } catch (e) { console.error(`❌ API ID Error: ${e.message}`); }
+        for (let id of ids) { 
+            if (!isNaN(id) && id.length > 5) return id; 
+        }
+    } catch (e) { 
+        console.error(`❌ API ID Error for ${username}: ${e.message}`); 
+    }
     return null;
 }
 
@@ -159,89 +171,209 @@ async function getTweetAuthorHandle(tweetId) {
             method: 'GET',
             url: `https://${RAPID_HOST}/tweet`,
             params: { id: tweetId },
-            headers: { 'x-rapidapi-key': RAPID_API_KEY, 'x-rapidapi-host': RAPID_HOST }
+            headers: { 
+                'x-rapidapi-key': RAPID_API_KEY, 
+                'x-rapidapi-host': RAPID_HOST 
+            },
+            timeout: 15000
         };
         const response = await axios.request(options);
         const handles = findValuesByKey(response.data, 'screen_name');
         if (handles.length > 0) return handles[0].toLowerCase();
         return null;
     } catch (e) {
-        console.error(`[Lookup] Failed to find author for tweet ${tweetId}`);
+        console.error(`[Lookup] Failed to find author for tweet ${tweetId}: ${e.message}`);
         return null;
     }
 }
 
+/**
+ * 🚀 ENHANCED V2 API REPLY CHECKER
+ * - Uses user-replies-v2 endpoint
+ * - Supports cursor pagination for 500+ tweets
+ * - Advanced retry logic with exponential backoff
+ * - Deep JSON parsing for all reply ID formats
+ */
 async function checkReplies(userNumericId, targetTweetIds) {
-    if (!userNumericId || !RAPID_API_KEY) return 0;
+    if (!userNumericId || !RAPID_API_KEY) {
+        console.warn(`⚠️ Missing userNumericId or API key`);
+        return 0;
+    }
 
-    const targetSet = new Set(targetTweetIds);
+    const targetSet = new Set(targetTweetIds.map(id => String(id)));
     if (targetSet.size === 0) return 0;
 
+    console.log(`🔍 Checking replies for user ${userNumericId} against ${targetSet.size} targets`);
+
     let matches = 0;
-    let nextToken = null;
+    let cursor = null;
+    let pageCount = 0;
     
-    // Config: 16 pages * 45 tweets = 720 tweets depth (Covers > 400 requirement)
-    const maxPages = 16;
-    const countPerPage = 45;
+    // Scan up to 30 pages × 20 tweets = 600 tweets depth
+    const maxPages = 30;
+    const tweetsPerPage = 20;
+    const matchedTweets = new Set();
 
     for (let i = 0; i < maxPages; i++) {
-        // Delay to prevent Rate Limit 429
-        if (i > 0) await new Promise(resolve => setTimeout(resolve, 800));
+        pageCount++;
+        
+        // Rate limiting delay (increased for stability)
+        if (i > 0) {
+            await new Promise(resolve => setTimeout(resolve, 1200));
+        }
+
+        const params = { 
+            user: userNumericId, 
+            count: String(tweetsPerPage)
+        };
+        
+        if (cursor) {
+            params.cursor = cursor;
+        }
 
         const options = {
             method: 'GET',
-            url: `https://${RAPID_HOST}/user-replies`, // V1 API
-            params: { 
-                user: userNumericId, 
-                count: String(countPerPage),
-                ...(nextToken && { cursor: nextToken }) 
+            url: `https://${RAPID_HOST}/user-replies-v2`,
+            params: params,
+            headers: { 
+                'x-rapidapi-key': RAPID_API_KEY, 
+                'x-rapidapi-host': RAPID_HOST 
             },
-            headers: { 'x-rapidapi-key': RAPID_API_KEY, 'x-rapidapi-host': RAPID_HOST }
+            timeout: 20000
         };
 
-        try {
-            const response = await axios.request(options);
-            
-            const foundIds = new Set();
-            findValuesByKey(response.data, 'in_reply_to_status_id_str', Array.from(foundIds)).forEach(id => foundIds.add(String(id)));
-            findValuesByKey(response.data, 'in_reply_to_status_id', Array.from(foundIds)).forEach(id => foundIds.add(String(id)));
+        let retries = 3;
+        let pageData = null;
 
-            const deepSearch = (obj) => {
-                if (Array.isArray(obj)) {
-                    obj.forEach(item => deepSearch(item));
-                } else if (typeof obj === 'object' && obj !== null) {
-                    if (obj.type === 'replied_to' && obj.id) {
-                        foundIds.add(String(obj.id));
-                    }
-                    Object.values(obj).forEach(val => deepSearch(val));
+        // Retry logic with exponential backoff
+        while (retries > 0) {
+            try {
+                const response = await axios.request(options);
+                pageData = response.data;
+                break; // Success
+            } catch (e) {
+                retries--;
+                
+                if (e.response && e.response.status === 429) {
+                    const waitTime = (4 - retries) * 5000; // 5s, 10s, 15s
+                    console.warn(`⚠️ Rate limit hit (page ${pageCount}). Waiting ${waitTime/1000}s... (${retries} retries left)`);
+                    await new Promise(r => setTimeout(r, waitTime));
+                    continue;
                 }
-            };
-            deepSearch(response.data);
-
-            for (const id of foundIds) {
-                if (targetSet.has(id)) matches++;
+                
+                if (retries === 0) {
+                    console.error(`❌ Failed to fetch page ${pageCount} for user ${userNumericId}: ${e.message}`);
+                    // Don't break entire scan, just skip this page
+                    pageData = null;
+                    break;
+                }
+                
+                // Other errors - short retry
+                await new Promise(r => setTimeout(r, 2000));
             }
+        }
 
-            const cursors = findValuesByKey(response.data, 'cursor');
-            if (cursors.length > 0) {
-                nextToken = cursors[cursors.length - 1];
-            } else {
-                break;
-            }
+        if (!pageData) {
+            console.warn(`⚠️ Skipping page ${pageCount} due to errors`);
+            continue;
+        }
 
-        } catch (e) {
-            // 🛡️ RECOVERY SYSTEM: If Rate Limited, wait and retry.
-            if (e.response && e.response.status === 429) {
-                console.warn(`⚠️ Rate Limit Hit for user ${userNumericId}. Retrying in 5s...`);
-                await new Promise(r => setTimeout(r, 5000));
-                i--; // Retry this page
-                continue;
+        // 🔍 DEEP SCAN: Extract all possible reply IDs from response
+        const foundIds = new Set();
+
+        // Method 1: Direct field search
+        findValuesByKey(pageData, 'in_reply_to_status_id_str', Array.from(foundIds)).forEach(id => foundIds.add(String(id)));
+        findValuesByKey(pageData, 'in_reply_to_status_id', Array.from(foundIds)).forEach(id => foundIds.add(String(id)));
+        findValuesByKey(pageData, 'conversation_id_str', Array.from(foundIds)).forEach(id => foundIds.add(String(id)));
+
+        // Method 2: Deep recursive search for reply references
+        const deepSearch = (obj) => {
+            if (!obj) return;
+            
+            if (Array.isArray(obj)) {
+                obj.forEach(item => deepSearch(item));
+            } else if (typeof obj === 'object') {
+                // Check for reply-to patterns
+                if (obj.type === 'replied_to' && obj.id) {
+                    foundIds.add(String(obj.id));
+                }
+                if (obj.replied_to_tweet_id) {
+                    foundIds.add(String(obj.replied_to_tweet_id));
+                }
+                if (obj.referenced_tweets && Array.isArray(obj.referenced_tweets)) {
+                    obj.referenced_tweets.forEach(ref => {
+                        if (ref.type === 'replied_to' && ref.id) {
+                            foundIds.add(String(ref.id));
+                        }
+                    });
+                }
+                
+                // Recurse through all nested objects
+                Object.values(obj).forEach(val => deepSearch(val));
             }
-            console.error(`❌ API Reply Error for user ${userNumericId}: ${e.message}`);
+        };
+        deepSearch(pageData);
+
+        // Method 3: Check tweet entities and legacy data
+        if (pageData.data && Array.isArray(pageData.data)) {
+            pageData.data.forEach(tweet => {
+                if (tweet.legacy && tweet.legacy.in_reply_to_status_id_str) {
+                    foundIds.add(String(tweet.legacy.in_reply_to_status_id_str));
+                }
+                if (tweet.in_reply_to_status_id_str) {
+                    foundIds.add(String(tweet.in_reply_to_status_id_str));
+                }
+            });
+        }
+
+        // Check matches
+        let pageMatches = 0;
+        for (const id of foundIds) {
+            if (targetSet.has(id) && !matchedTweets.has(id)) {
+                matchedTweets.add(id);
+                matches++;
+                pageMatches++;
+            }
+        }
+
+        if (pageMatches > 0) {
+            console.log(`✅ Page ${pageCount}: Found ${pageMatches} matches (Total: ${matches}/${targetSet.size})`);
+        }
+
+        // Extract cursor for next page
+        let nextCursor = null;
+        
+        // Try multiple cursor locations
+        if (pageData.next_cursor) {
+            nextCursor = pageData.next_cursor;
+        } else if (pageData.cursor) {
+            nextCursor = pageData.cursor;
+        } else {
+            const cursors = findValuesByKey(pageData, 'cursor');
+            const nextCursors = findValuesByKey(pageData, 'next_cursor');
+            
+            if (nextCursors.length > 0) {
+                nextCursor = nextCursors[nextCursors.length - 1];
+            } else if (cursors.length > 0) {
+                nextCursor = cursors[cursors.length - 1];
+            }
+        }
+
+        // Stop if no more pages or all targets found
+        if (!nextCursor || nextCursor === cursor) {
+            console.log(`📍 Reached end of replies at page ${pageCount}`);
             break;
         }
+        
+        if (matches >= targetSet.size) {
+            console.log(`🎯 All targets found! Stopping scan.`);
+            break;
+        }
+
+        cursor = nextCursor;
     }
 
+    console.log(`📊 Scan complete: ${matches}/${targetSet.size} replies found across ${pageCount} pages`);
     return matches;
 }
 
@@ -257,7 +389,7 @@ async function sendWarning() {
 }
 
 async function openSession(triggerMsg = null) {
-    setSetting('session_status', 'open'); // 🔓 SET STATE OPEN
+    setSetting('session_status', 'open');
     clearSession(); 
     const channelId = getSetting('channel_id');
     if (!channelId) return triggerMsg?.reply("❌ No Channel Set.");
@@ -267,6 +399,7 @@ async function openSession(triggerMsg = null) {
     try {
         await channel.permissionOverwrites.edit(RAID_ROLE_ID, { SendMessages: true });
     } catch (e) {
+        console.error(`Permission error: ${e.message}`);
         if (triggerMsg) triggerMsg.reply("❌ Permission Error: Cannot unlock role.");
         return;
     }
@@ -284,7 +417,7 @@ Session is now open! Please post your Elite tweets.
 }
 
 async function closeSessionOnly(triggerMsg = null) {
-    setSetting('session_status', 'closed'); // 🔒 SET STATE CLOSED
+    setSetting('session_status', 'closed');
     const channelId = getSetting('channel_id');
     if (!channelId) return triggerMsg?.reply("❌ No Channel.");
     const channel = await client.channels.fetch(channelId).catch(() => null);
@@ -293,6 +426,7 @@ async function closeSessionOnly(triggerMsg = null) {
     try {
         await channel.permissionOverwrites.edit(RAID_ROLE_ID, { SendMessages: false });
     } catch (e) {
+        console.error(`Permission error: ${e.message}`);
         if (triggerMsg) triggerMsg.reply("❌ Permission Error: Cannot lock role.");
     }
 
@@ -320,21 +454,28 @@ async function generateFinalReport(triggerMsg = null) {
     if (!channel) return triggerMsg?.reply("❌ Channel Not Found.");
 
     const sessionData = getSessionLinks();
-    if (sessionData.length === 0) return channel.send("⚠️ **No links posted.**");
+    if (sessionData.length === 0) return channel.send("⚠️ **No links posted this session.**");
 
-    await channel.send(`⏳ **Checking ${sessionData.length} participants...**`);
+    const statusMsg = await channel.send(`⏳ **Analyzing ${sessionData.length} participants...**\nThis may take several minutes.`);
 
     const allTargets = sessionData.map(r => r.tweet_id);
     const results = [];
     const uniqueUsers = new Set(sessionData.map(r => r.discord_id));
 
+    let processedUsers = 0;
     for (let userId of uniqueUsers) {
+        processedUsers++;
+        
+        // Update status every 3 users
+        if (processedUsers % 3 === 0) {
+            await statusMsg.edit(`⏳ **Analyzing participants... (${processedUsers}/${uniqueUsers.size})**`).catch(() => {});
+        }
+
         let user = getUser(userId);
         let score = 0;
         let handle = "Unknown";
         let isGhost = false;
 
-        // INTERNAL LOGIC: If ID starts with ghost:, it was an admin injection.
         if (userId.startsWith('ghost:')) {
             isGhost = true;
             handle = userId.split(':')[1];
@@ -349,13 +490,22 @@ async function generateFinalReport(triggerMsg = null) {
         if (requirement === 0) requirement = 1;
 
         if (!isGhost && user && user.numeric_id) {
-            score = await checkReplies(user.numeric_id, targetsForThisUser);
-            if (score > requirement) score = requirement;
-            await new Promise(r => setTimeout(r, 2000));
+            try {
+                score = await checkReplies(user.numeric_id, targetsForThisUser);
+                if (score > requirement) score = requirement;
+            } catch (e) {
+                console.error(`Error checking replies for ${handle}: ${e.message}`);
+                score = 0;
+            }
+            
+            // Delay between users to avoid overwhelming API
+            await new Promise(r => setTimeout(r, 2500));
         }
         
         results.push({ id: userId, handle, score, req: requirement, isGhost });
     }
+
+    await statusMsg.delete().catch(() => {});
 
     results.sort((a, b) => b.score - a.score);
 
@@ -455,16 +605,14 @@ client.on('messageCreate', async message => {
 
     const channelId = getSetting('channel_id');
     
-    // TRACKING LOGIC (For Users)
+    // TRACKING LOGIC
     if (channelId && message.channel.id === channelId) {
         const urlRegex = /(?:x|twitter)\.com\/(?:[a-zA-Z0-9_]+\/status\/|i\/status\/)(\d+)/g;
         const matches = [...message.content.matchAll(urlRegex)];
 
         if (matches.length > 0) {
             
-            // 🛑 CHECK: IS SESSION OPEN?
             if (!isSessionOpen()) {
-                // Ignore tracking if session is closed.
                 return;
             }
 
@@ -474,12 +622,12 @@ client.on('messageCreate', async message => {
                     await message.delete();
                     const w = await message.channel.send(`⛔ <@${message.author.id}> **Unregistered.**`);
                     setTimeout(() => w.delete().catch(() => {}), 5000);
-                } catch (e) {}
+                } catch (e) {
+                    console.error(`Error handling unregistered user: ${e.message}`);
+                }
                 return;
             }
 
-            // 👑 PERMISSIONS
-            // Check Admin logic earlier now
             let isAdmin = SUPER_ADMINS.includes(message.author.id);
             if (!isAdmin) {
                 const roleId = getSetting('admin_role_id');
@@ -487,20 +635,17 @@ client.on('messageCreate', async message => {
                 if (message.member.permissions.has('Administrator')) isAdmin = true;
             }
 
-            // 🛑 RULE: ONE LINK PER PERSON (Non-Admins)
             if (!isAdmin) {
-                // 1. Check if trying to post multiple in one msg
                 if (matches.length > 1) {
-                    await message.delete();
+                    await message.delete().catch(() => {});
                     const w = await message.channel.send(`⚠️ <@${message.author.id}> **One link per message only.**`);
                     setTimeout(() => w.delete().catch(() => {}), 5000);
                     return;
                 }
 
-                // 2. Check if already posted in this session
                 const existing = db.prepare('SELECT 1 FROM session_activity WHERE discord_id = ?').get(message.author.id);
                 if (existing) {
-                    await message.delete();
+                    await message.delete().catch(() => {});
                     const w = await message.channel.send(`⚠️ <@${message.author.id}> **You have already posted a link this session!**`);
                     setTimeout(() => w.delete().catch(() => {}), 5000);
                     return;
@@ -513,7 +658,6 @@ client.on('messageCreate', async message => {
                 let tweetId = match[1];
                 let finalDiscordId = message.author.id; 
                 
-                // 🧠 SMART ADMIN INJECTION (Silent)
                 if (isAdmin) {
                     const twitterHandle = await getTweetAuthorHandle(tweetId);
                     if (twitterHandle) {
@@ -531,12 +675,12 @@ client.on('messageCreate', async message => {
             }
 
             if (addedCount > 0) {
-                await message.react('💎');
+                await message.react('💎').catch(() => {});
             }
         }
     }
 
-    // COMMAND LOGIC (Strictly Admin Only)
+    // COMMAND LOGIC
     if (!message.content.startsWith('!')) return;
     
     let isAdmin = SUPER_ADMINS.includes(message.author.id);
@@ -546,13 +690,11 @@ client.on('messageCreate', async message => {
         if (message.member.permissions.has('Administrator')) isAdmin = true;
     }
 
-    // 🛑 STOP if not admin
     if (!isAdmin) return; 
 
     const args = message.content.slice(1).trim().split(/ +/);
     const command = args.shift().toLowerCase();
 
-    // HELP COMMAND
     if (command === 'help') {
         const embed = new EmbedBuilder()
             .setColor('#3498db')
@@ -561,12 +703,11 @@ client.on('messageCreate', async message => {
             .addFields(
                 { name: '🕹️ Session Control', value: '`!start` - Force Open Session\n`!close` - Force Close Session\n`!forcereport` - Run Report Now' },
                 { name: '👥 User Management', value: '`!register @user @handle` - Link user manually\n`!listusers` - View database' },
-                { name: '⚙️ Config', value: '`!settime` - Set schedule\n`!setchannel #channel` - Set raid channel' }
+                { name: '⚙️ Config', value: '`!settime` - Set schedule\n`!setchannel #channel` - Set raid channel\n`!version` - Show bot version' }
             );
         return message.reply({ embeds: [embed] });
     }
 
-    // ... (Existing commands) ...
     if (command === 'settime') {
         const hourOptions = [];
         for (let i = 0; i < 24; i++) {
@@ -660,8 +801,10 @@ client.on('messageCreate', async message => {
     }
 
     if (command === 'version') return message.reply(`🤖 Bot Version: **${VERSION}**`);
+    
     if (command === 'setchannel') {
         const channel = message.mentions.channels.first();
+        if (!channel) return message.reply("❌ Usage: `!setchannel #channel`");
         setSetting('channel_id', channel.id);
         message.reply(`✅ Raid Channel: ${channel}`);
     }
@@ -683,10 +826,19 @@ client.on('messageCreate', async message => {
 });
 
 client.once('ready', () => {
-    console.log(`Logged in as ${client.user.tag} - ${VERSION}`);
-    // Reset session state to closed on restart to be safe, or leave it to persist
-    // setSetting('session_status', 'closed'); 
+    console.log(`✅ Logged in as ${client.user.tag}`);
+    console.log(`🤖 Version: ${VERSION}`);
+    console.log(`📊 Database: ${dbPath}`);
     rescheduleCrons();
+});
+
+// Global error handlers
+process.on('unhandledRejection', (error) => {
+    console.error('❌ Unhandled promise rejection:', error);
+});
+
+process.on('uncaughtException', (error) => {
+    console.error('❌ Uncaught exception:', error);
 });
 
 client.login(TOKEN);
