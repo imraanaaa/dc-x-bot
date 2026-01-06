@@ -34,7 +34,7 @@ const SUPER_ADMINS = [
 // 🔔 ROLE TO TAG (For Lock/Unlock)
 const RAID_ROLE_ID = "1455184518104485950";
 
-const VERSION = "v20.0 (V2 API + Deep Scan)";
+const VERSION = "v21.0 (Comments-V2 API + 100 per tweet)";
 
 // 📂 DATABASE SETUP
 const DATA_DIR = fs.existsSync('/dataaa') ? '/dataaa' : './data';
@@ -188,12 +188,11 @@ async function getTweetAuthorHandle(tweetId) {
 }
 
 /**
- * 🚀 ENHANCED V2 API REPLY CHECKER WITH FULL DEBUG MODE
- * - Uses user-replies-v2 endpoint
- * - Supports cursor pagination for 500+ tweets
- * - Advanced retry logic with exponential backoff
- * - Deep JSON parsing for all reply ID formats
- * - Complete response logging for debugging
+ * 🚀 ENHANCED COMMENTS-V2 API CHECKER 
+ * - Uses comments-v2 endpoint to fetch ALL replies to target tweets
+ * - Fetches up to 100 comments per tweet
+ * - Checks if registered user's handle appears in ANY comment
+ * - Returns match count for the user across all target tweets
  */
 async function checkReplies(userNumericId, targetTweetIds) {
     if (!userNumericId || !RAPID_API_KEY) {
@@ -204,94 +203,71 @@ async function checkReplies(userNumericId, targetTweetIds) {
     const targetSet = new Set(targetTweetIds.map(id => String(id)));
     if (targetSet.size === 0) return 0;
 
+    // Get the user's handle from database
+    const userRecord = db.prepare('SELECT handle FROM users WHERE numeric_id = ?').get(userNumericId);
+    if (!userRecord) {
+        console.warn(`⚠️ No handle found for numeric_id: ${userNumericId}`);
+        return 0;
+    }
+    
+    const userHandle = userRecord.handle.toLowerCase();
+
     console.log(`\n${'='.repeat(60)}`);
-    console.log(`🔍 CHECKING REPLIES FOR USER: ${userNumericId}`);
-    console.log(`🎯 Target tweets to find: ${targetSet.size}`);
+    console.log(`🔍 CHECKING COMMENTS FOR USER: ${userHandle} (${userNumericId})`);
+    console.log(`🎯 Target tweets to check: ${targetSet.size}`);
     console.log(`📋 Targets: ${Array.from(targetSet).join(', ')}`);
     console.log(`${'='.repeat(60)}\n`);
 
     let matches = 0;
-    let cursor = null;
-    let pageCount = 0;
-    
-    // Scan up to 40 pages × 40 tweets = 1600 tweets depth (increased)
-    const maxPages = 40;
-    const tweetsPerPage = 40;
     const matchedTweets = new Set();
-    let totalTweetsScanned = 0;
-
-    for (let i = 0; i < maxPages; i++) {
-        pageCount++;
+    let totalCommentsScanned = 0;
+    
+    // Check each target tweet for user's comments
+    for (const tweetId of targetSet) {
+        console.log(`\n📄 Fetching comments for tweet ${tweetId}...`);
         
-        // Rate limiting delay (increased for stability)
-        if (i > 0) {
+        // Rate limiting delay
+        if (matchedTweets.size > 0) {
             await new Promise(resolve => setTimeout(resolve, 1500));
-        }
-
-        const params = { 
-            user: userNumericId, 
-            count: String(tweetsPerPage)
-        };
-        
-        if (cursor) {
-            params.cursor = cursor;
         }
 
         const options = {
             method: 'GET',
-            url: `https://${RAPID_HOST}/user-replies-v2`,
-            params: params,
-            headers: { 
-                'x-rapidapi-key': RAPID_API_KEY, 
-                'x-rapidapi-host': RAPID_HOST 
+            url: `https://${RAPID_HOST}/comments-v2`,
+            params: {
+                pid: tweetId,
+                rankingMode: 'Relevance',
+                count: '100'
+            },
+            headers: {
+                'x-rapidapi-key': RAPID_API_KEY,
+                'x-rapidapi-host': RAPID_HOST
             },
             timeout: 25000
         };
 
-        console.log(`📄 Fetching page ${pageCount}${cursor ? ' (cursor: ' + cursor.substring(0, 20) + '...)' : ' (initial)'}`);
-
         let retries = 3;
-        let pageData = null;
+        let commentsData = null;
 
         // Retry logic with exponential backoff
         while (retries > 0) {
             try {
                 const response = await axios.request(options);
-                pageData = response.data;
-                
-                // DEBUG: Log raw response structure on first page
-                if (i === 0) {
-                    console.log(`\n🔬 RAW API RESPONSE STRUCTURE (Page 1):`);
-                    console.log(`Response keys: ${Object.keys(pageData).join(', ')}`);
-                    if (pageData.data) {
-                        console.log(`Data type: ${Array.isArray(pageData.data) ? 'Array' : typeof pageData.data}`);
-                        if (Array.isArray(pageData.data) && pageData.data.length > 0) {
-                            console.log(`First tweet keys: ${Object.keys(pageData.data[0]).join(', ')}`);
-                            if (pageData.data[0].tweet) {
-                                console.log(`First tweet.tweet keys: ${Object.keys(pageData.data[0].tweet).join(', ')}`);
-                            }
-                            if (pageData.data[0].legacy) {
-                                console.log(`First tweet.legacy keys: ${Object.keys(pageData.data[0].legacy).join(', ')}`);
-                            }
-                        }
-                    }
-                    console.log(''); // newline
-                }
-                
+                commentsData = response.data;
                 break; // Success
             } catch (e) {
                 retries--;
                 
                 if (e.response && e.response.status === 429) {
                     const waitTime = (4 - retries) * 5000; // 5s, 10s, 15s
-                    console.warn(`⚠️ Rate limit hit (page ${pageCount}). Waiting ${waitTime/1000}s... (${retries} retries left)`);
+                    console.warn(`⚠️ Rate limit hit for tweet ${tweetId}. Waiting ${waitTime/1000}s... (${retries} retries left)`);
                     await new Promise(r => setTimeout(r, waitTime));
                     continue;
                 }
                 
                 if (retries === 0) {
-                    console.error(`❌ Failed to fetch page ${pageCount} for user ${userNumericId}: ${e.message}`);
-                    pageData = null;
+                    console.error(`❌ Failed to fetch comments for tweet ${tweetId}: ${e.message}`);
+                    commentsData = null;
                     break;
                 }
                 
@@ -300,178 +276,61 @@ async function checkReplies(userNumericId, targetTweetIds) {
             }
         }
 
-        if (!pageData) {
-            console.warn(`⚠️ Skipping page ${pageCount} due to errors`);
+        if (!commentsData || !commentsData.data) {
+            console.warn(`⚠️ No comments data returned for tweet ${tweetId}`);
             continue;
         }
 
-        // 🔍 ULTRA DEEP SCAN: Extract ALL possible reply IDs from response
-        const foundIds = new Set();
-        let tweetsOnPage = 0;
-
-        // Method 1: findValuesByKey for common fields
-        const replyFields = [
-            'in_reply_to_status_id_str',
-            'in_reply_to_status_id', 
-            'conversation_id_str',
-            'replied_to_tweet_id',
-            'replying_to',
-            'reply_to_status_id'
-        ];
+        const comments = Array.isArray(commentsData.data) ? commentsData.data : [];
+        totalCommentsScanned += comments.length;
         
-        replyFields.forEach(field => {
-            const values = findValuesByKey(pageData, field);
-            values.forEach(id => {
-                if (id && id.length > 5) foundIds.add(String(id));
-            });
-        });
+        console.log(`📊 Found ${comments.length} comments on tweet ${tweetId}`);
 
-        // Method 2: Deep recursive search with expanded patterns
-        const deepSearch = (obj, path = '') => {
-            if (!obj) return;
+        // Check if user commented on this tweet
+        let userCommented = false;
+        
+        for (const comment of comments) {
+            // Extract commenter's handle from various possible structures
+            let commenterHandle = null;
             
-            if (Array.isArray(obj)) {
-                obj.forEach((item, idx) => deepSearch(item, `${path}[${idx}]`));
-            } else if (typeof obj === 'object') {
-                // Count tweets
-                if (obj.id_str || obj.rest_id || obj.tweet_id) {
-                    tweetsOnPage++;
-                }
-                
-                // Check for reply-to patterns (expanded)
-                if (obj.type === 'replied_to' && obj.id) {
-                    foundIds.add(String(obj.id));
-                }
-                if (obj.replied_to_tweet_id) {
-                    foundIds.add(String(obj.replied_to_tweet_id));
-                }
-                
-                // Check referenced_tweets (V2 API format)
-                if (obj.referenced_tweets && Array.isArray(obj.referenced_tweets)) {
-                    obj.referenced_tweets.forEach(ref => {
-                        if (ref.type === 'replied_to' && ref.id) {
-                            foundIds.add(String(ref.id));
-                        }
-                    });
-                }
-                
-                // Check in_reply_to fields directly in objects
-                if (obj.in_reply_to_status_id_str) {
-                    foundIds.add(String(obj.in_reply_to_status_id_str));
-                }
-                if (obj.in_reply_to_status_id) {
-                    foundIds.add(String(obj.in_reply_to_status_id));
-                }
-                
-                // Recurse through all nested objects
-                Object.entries(obj).forEach(([key, val]) => {
-                    deepSearch(val, path ? `${path}.${key}` : key);
-                });
+            // Try different structures
+            if (comment.user && comment.user.screen_name) {
+                commenterHandle = comment.user.screen_name.toLowerCase();
+            } else if (comment.screen_name) {
+                commenterHandle = comment.screen_name.toLowerCase();
+            } else if (comment.author && comment.author.username) {
+                commenterHandle = comment.author.username.toLowerCase();
+            } else if (comment.author && comment.author.screen_name) {
+                commenterHandle = comment.author.screen_name.toLowerCase();
+            } else if (comment.username) {
+                commenterHandle = comment.username.toLowerCase();
             }
-        };
-        deepSearch(pageData);
-
-        // Method 3: Specific V2 API structure parsing
-        if (pageData.data) {
-            if (Array.isArray(pageData.data)) {
-                pageData.data.forEach(item => {
-                    // V2 structure: data[].tweet or data[] directly
-                    const tweet = item.tweet || item;
-                    
-                    if (tweet.legacy) {
-                        if (tweet.legacy.in_reply_to_status_id_str) {
-                            foundIds.add(String(tweet.legacy.in_reply_to_status_id_str));
-                        }
-                        if (tweet.legacy.conversation_id_str) {
-                            foundIds.add(String(tweet.legacy.conversation_id_str));
-                        }
-                    }
-                    
-                    // Check direct fields
-                    if (tweet.in_reply_to_status_id_str) {
-                        foundIds.add(String(tweet.in_reply_to_status_id_str));
-                    }
-                });
-            }
-        }
-        
-        // Method 4: Check timeline structure
-        if (pageData.timeline) {
-            const timelineIds = findValuesByKey(pageData.timeline, 'in_reply_to_status_id_str');
-            timelineIds.forEach(id => foundIds.add(String(id)));
-        }
-
-        totalTweetsScanned += tweetsOnPage;
-
-        // Check matches against targets
-        let pageMatches = 0;
-        const newMatches = [];
-        
-        for (const id of foundIds) {
-            if (targetSet.has(id) && !matchedTweets.has(id)) {
-                matchedTweets.add(id);
-                matches++;
-                pageMatches++;
-                newMatches.push(id);
-            }
-        }
-
-        console.log(`📊 Page ${pageCount}: Scanned ${tweetsOnPage} tweets, found ${foundIds.size} reply IDs`);
-        
-        if (pageMatches > 0) {
-            console.log(`   ✅ MATCHES on this page: ${pageMatches} (IDs: ${newMatches.join(', ')})`);
-            console.log(`   📈 Total matches so far: ${matches}/${targetSet.size}`);
-        } else {
-            console.log(`   ⚪ No new matches on this page`);
-        }
-
-        // Extract cursor for next page with better detection
-        let nextCursor = null;
-        
-        // Try all possible cursor locations
-        if (pageData.next_cursor) {
-            nextCursor = pageData.next_cursor;
-        } else if (pageData.cursor) {
-            nextCursor = pageData.cursor;
-        } else {
-            // Deep search for cursor values
-            const cursors = findValuesByKey(pageData, 'value');
-            const nextCursors = findValuesByKey(pageData, 'next_cursor');
             
-            if (nextCursors.length > 0) {
-                nextCursor = nextCursors[nextCursors.length - 1];
-            } else if (cursors.length > 0) {
-                // Filter out non-cursor values (cursors are typically long strings)
-                const validCursors = cursors.filter(c => typeof c === 'string' && c.length > 10);
-                if (validCursors.length > 0) {
-                    nextCursor = validCursors[validCursors.length - 1];
-                }
+            // Check if it's our user
+            if (commenterHandle && commenterHandle === userHandle) {
+                userCommented = true;
+                console.log(`   ✅ MATCH! User @${userHandle} commented on tweet ${tweetId}`);
+                break;
             }
         }
 
-        // Stop conditions
-        if (!nextCursor || nextCursor === cursor) {
-            console.log(`\n🏁 Reached end of replies at page ${pageCount} (no more cursor)`);
-            break;
+        if (userCommented) {
+            matchedTweets.add(tweetId);
+            matches++;
+        } else {
+            console.log(`   ❌ User @${userHandle} did NOT comment on tweet ${tweetId}`);
         }
-        
-        if (matches >= targetSet.size) {
-            console.log(`\n🎯 All targets found! Stopping scan early.`);
-            break;
-        }
-
-        cursor = nextCursor;
     }
 
     console.log(`\n${'='.repeat(60)}`);
-    console.log(`📊 FINAL SCAN RESULTS FOR USER ${userNumericId}`);
-    console.log(`   Pages scanned: ${pageCount}`);
-    console.log(`   Total tweets scanned: ${totalTweetsScanned}`);
+    console.log(`📊 FINAL SCAN RESULTS FOR USER @${userHandle} (${userNumericId})`);
+    console.log(`   Tweets checked: ${targetSet.size}`);
+    console.log(`   Total comments scanned: ${totalCommentsScanned}`);
     console.log(`   Matches found: ${matches}/${targetSet.size}`);
     console.log(`   Success rate: ${Math.floor((matches / targetSet.size) * 100)}%`);
     if (matches < targetSet.size) {
         const missing = Array.from(targetSet).filter(id => !matchedTweets.has(id));
-        console.log(`   ❌ Missing replies to: ${missing.join(', ')}`);
+        console.log(`   ❌ Missing comments on: ${missing.join(', ')}`);
     }
     console.log(`${'='.repeat(60)}\n`);
     
