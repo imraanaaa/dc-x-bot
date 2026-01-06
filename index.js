@@ -35,7 +35,7 @@ const SUPER_ADMINS = [
 // 🔔 ROLE TO TAG (For Lock/Unlock)
 const RAID_ROLE_ID = "1455184518104485950";
 
-const VERSION = "v21.3 (Back to User-Tweets + Admin Features)";
+const VERSION = "v22.0 (Fixed user-replies-v2 + 100 per page)";
 
 // 📂 DATABASE SETUP
 const DATA_DIR = fs.existsSync('/dataaa') ? '/dataaa' : './data';
@@ -216,10 +216,10 @@ function extractTweetId(url) {
 }
 
 /**
- * 🚀 HYBRID REPLY CHECKER
- * - Gets user's recent tweets (including replies)
- * - Checks if any are replies to the target tweets
- * - More reliable than comments-v2 endpoint
+ * 🚀 USER-REPLIES-V2 CHECKER (FIXED)
+ * - Uses user-replies-v2 endpoint with correct structure parsing
+ * - Fetches up to 100 replies per page
+ * - Properly counts tweets and matches reply IDs
  */
 async function checkReplies(userNumericId, targetTweetIds) {
     if (!userNumericId || !RAPID_API_KEY) {
@@ -249,9 +249,9 @@ async function checkReplies(userNumericId, targetTweetIds) {
     let cursor = null;
     let pageCount = 0;
     
-    // Scan up to 20 pages to find replies
-    const maxPages = 20;
-    const tweetsPerPage = 40;
+    // Scan up to 30 pages with 100 tweets each = 3000 tweets depth
+    const maxPages = 30;
+    const tweetsPerPage = 100;
     const matchedTweets = new Set();
     let totalTweetsScanned = 0;
 
@@ -274,7 +274,7 @@ async function checkReplies(userNumericId, targetTweetIds) {
 
         const options = {
             method: 'GET',
-            url: `https://${RAPID_HOST}/user-tweets`,
+            url: `https://${RAPID_HOST}/user-replies-v2`,
             params: params,
             headers: { 
                 'x-rapidapi-key': RAPID_API_KEY, 
@@ -320,49 +320,38 @@ async function checkReplies(userNumericId, targetTweetIds) {
             continue;
         }
 
-        // Extract ALL possible reply-to IDs from response
+        // Parse the response properly
         const foundIds = new Set();
         let tweetsOnPage = 0;
 
-        // Method 1: Use findValuesByKey for common fields
-        const replyFields = [
-            'in_reply_to_status_id_str',
-            'in_reply_to_status_id', 
-            'conversation_id_str',
-            'replied_to_tweet_id',
-            'replying_to',
-            'reply_to_status_id'
-        ];
-        
-        replyFields.forEach(field => {
-            const values = findValuesByKey(pageData, field);
-            values.forEach(id => {
-                if (id && id.length > 5) foundIds.add(String(id));
-            });
-        });
-
-        // Method 2: Check for tweets in data array
+        // user-replies-v2 returns data in: response.data (array of tweet objects)
         if (pageData.data && Array.isArray(pageData.data)) {
+            tweetsOnPage = pageData.data.length;
+            
             pageData.data.forEach(item => {
-                tweetsOnPage++;
-                const tweet = item.tweet || item.legacy || item;
+                // The structure could be: item.tweet.legacy or item.legacy or item directly
+                const tweet = item.tweet || item;
                 
-                // Check legacy structure
+                // Check for in_reply_to_status_id_str in legacy
+                if (tweet.legacy && tweet.legacy.in_reply_to_status_id_str) {
+                    foundIds.add(String(tweet.legacy.in_reply_to_status_id_str));
+                }
+                
+                // Check direct fields
                 if (tweet.in_reply_to_status_id_str) {
                     foundIds.add(String(tweet.in_reply_to_status_id_str));
                 }
                 if (tweet.in_reply_to_status_id) {
                     foundIds.add(String(tweet.in_reply_to_status_id));
                 }
-                
-                // Check nested legacy
-                if (tweet.legacy) {
-                    if (tweet.legacy.in_reply_to_status_id_str) {
-                        foundIds.add(String(tweet.legacy.in_reply_to_status_id_str));
-                    }
-                }
             });
         }
+
+        // Also use deep search as backup
+        const deepReplyIds = findValuesByKey(pageData, 'in_reply_to_status_id_str');
+        deepReplyIds.forEach(id => {
+            if (id && id.length > 5) foundIds.add(String(id));
+        });
 
         totalTweetsScanned += tweetsOnPage;
 
@@ -411,7 +400,7 @@ async function checkReplies(userNumericId, targetTweetIds) {
 
         // Stop conditions
         if (!nextCursor || nextCursor === cursor) {
-            console.log(`\n🏁 Reached end of timeline at page ${pageCount}`);
+            console.log(`\n🏁 Reached end of replies at page ${pageCount}`);
             break;
         }
         
@@ -720,18 +709,9 @@ client.on('messageCreate', async message => {
                 let tweetId = match[1];
                 let finalDiscordId = message.author.id; 
                 
-                if (isAdmin) {
-                    const twitterHandle = await getTweetAuthorHandle(tweetId);
-                    if (twitterHandle) {
-                        const dbUser = getUserByHandle(twitterHandle);
-                        if (dbUser) {
-                            finalDiscordId = dbUser.discord_id;
-                        } else {
-                            finalDiscordId = `ghost:${twitterHandle.toLowerCase()}`;
-                        }
-                    }
-                }
-
+                // For admins, always use their own ID when posting links
+                // They can use !post @user <link> to post on behalf of others
+                
                 addSessionLink(tweetId, finalDiscordId);
                 addedCount++;
             }
