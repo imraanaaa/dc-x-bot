@@ -28,13 +28,14 @@ const RAPID_HOST = "twitter241.p.rapidapi.com";
 const SUPER_ADMINS = [
     "1442310589362999428", // Admin 1
     "1442618881285034099", // Admin 2
-    "627327810079424533"   // Admin 3
+    "627327810079424533",  // Admin 3
+    "986489740045987880"   // Developer (imraanaaa)
 ];
 
 // 🔔 ROLE TO TAG (For Lock/Unlock)
 const RAID_ROLE_ID = "1455184518104485950";
 
-const VERSION = "v21.0 (Comments-V2 API + 100 per tweet)";
+const VERSION = "v21.1 (Comments-V2 + Admin Post Features)";
 
 // 📂 DATABASE SETUP
 const DATA_DIR = fs.existsSync('/dataaa') ? '/dataaa' : './data';
@@ -185,6 +186,33 @@ async function getTweetAuthorHandle(tweetId) {
         console.error(`[Lookup] Failed to find author for tweet ${tweetId}: ${e.message}`);
         return null;
     }
+}
+
+/**
+ * Extract tweet ID from various Twitter/X URL formats
+ * Supports: /status/, /statuses/, /post/, twitter.com, x.com
+ */
+function extractTweetId(url) {
+    const patterns = [
+        /\/status\/(\d+)/i,
+        /\/statuses\/(\d+)/i,
+        /\/post\/(\d+)/i,
+        /twitter\.com\/\w+\/status\/(\d+)/i,
+        /twitter\.com\/\w+\/statuses\/(\d+)/i,
+        /twitter\.com\/\w+\/post\/(\d+)/i,
+        /x\.com\/\w+\/status\/(\d+)/i,
+        /x\.com\/\w+\/statuses\/(\d+)/i,
+        /x\.com\/\w+\/post\/(\d+)/i
+    ];
+    
+    for (const pattern of patterns) {
+        const match = url.match(pattern);
+        if (match && match[1]) {
+            return match[1];
+        }
+    }
+    
+    return null;
 }
 
 /**
@@ -567,7 +595,8 @@ client.on('messageCreate', async message => {
     
     // TRACKING LOGIC
     if (channelId && message.channel.id === channelId) {
-        const urlRegex = /(?:x|twitter)\.com\/(?:[a-zA-Z0-9_]+\/status\/|i\/status\/)(\d+)/g;
+        // Enhanced regex to catch /status/, /statuses/, /post/, and i/status formats
+        const urlRegex = /(?:x|twitter)\.com\/(?:[a-zA-Z0-9_]+\/(?:status|statuses|post)\/|i\/(?:status|statuses|post)\/)(\d+)/gi;
         const matches = [...message.content.matchAll(urlRegex)];
 
         if (matches.length > 0) {
@@ -663,6 +692,7 @@ client.on('messageCreate', async message => {
             .addFields(
                 { name: '🕹️ Session Control', value: '`!start` - Force Open Session\n`!close` - Force Close Session\n`!forcereport` - Run Report Now' },
                 { name: '👥 User Management', value: '`!register @user @handle` - Link user manually\n`!listusers` - View database' },
+                { name: '🔗 Admin Posting', value: '`!post @user <tweet_link>` - Post on behalf of user\n`!mypost <tweet_link>` - Post your own tweet link' },
                 { name: '⚙️ Config', value: '`!settime` - Set schedule\n`!setchannel #channel` - Set raid channel\n`!version` - Show bot version' }
             );
         return message.reply({ embeds: [embed] });
@@ -758,6 +788,72 @@ client.on('messageCreate', async message => {
         } else {
             await statusMsg.edit(`❌ Failed. Check handle/API.`);
         }
+    }
+
+    if (command === 'post') {
+        // Admin posts a tweet link on behalf of a registered user
+        if (!isSessionOpen()) {
+            return message.reply("❌ Session is not open. Start a session first with `!start`");
+        }
+
+        const targetUser = message.mentions.users.first();
+        const tweetUrl = args[args.length - 1]; // Last argument should be the URL
+        
+        if (!targetUser || !tweetUrl) {
+            return message.reply("❌ Usage: `!post @user <tweet_link>`");
+        }
+
+        const tweetId = extractTweetId(tweetUrl);
+        if (!tweetId) {
+            return message.reply("❌ Invalid tweet link. Please provide a valid Twitter/X URL.");
+        }
+
+        const dbUser = getUser(targetUser.id);
+        if (!dbUser) {
+            return message.reply(`❌ <@${targetUser.id}> is not registered. Use \`!register @user @handle\` first.`);
+        }
+
+        // Check if this user already posted
+        const existing = db.prepare('SELECT 1 FROM session_activity WHERE discord_id = ?').get(targetUser.id);
+        if (existing) {
+            return message.reply(`⚠️ <@${targetUser.id}> has already posted a link this session!`);
+        }
+
+        addSessionLink(tweetId, targetUser.id);
+        await message.react('💎').catch(() => {});
+        await message.reply(`✅ Posted tweet link for <@${targetUser.id}> (@${dbUser.handle})`);
+    }
+
+    if (command === 'mypost') {
+        // Admin posts their own tweet link (bypassing automatic detection)
+        if (!isSessionOpen()) {
+            return message.reply("❌ Session is not open. Start a session first with `!start`");
+        }
+
+        const tweetUrl = args[0];
+        if (!tweetUrl) {
+            return message.reply("❌ Usage: `!mypost <tweet_link>`");
+        }
+
+        const tweetId = extractTweetId(tweetUrl);
+        if (!tweetId) {
+            return message.reply("❌ Invalid tweet link. Please provide a valid Twitter/X URL.");
+        }
+
+        const dbUser = getUser(message.author.id);
+        if (!dbUser) {
+            return message.reply(`❌ You are not registered. Use \`!register @${message.author.username} @YourTwitterHandle\` first.`);
+        }
+
+        // Check if admin already posted
+        const existing = db.prepare('SELECT 1 FROM session_activity WHERE discord_id = ?').get(message.author.id);
+        if (existing) {
+            return message.reply(`⚠️ You have already posted a link this session!`);
+        }
+
+        addSessionLink(tweetId, message.author.id);
+        await message.react('💎').catch(() => {});
+        await message.reply(`✅ Your tweet link has been added (@${dbUser.handle})`);
     }
 
     if (command === 'version') return message.reply(`🤖 Bot Version: **${VERSION}**`);
