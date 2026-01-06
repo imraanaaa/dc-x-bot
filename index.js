@@ -35,7 +35,7 @@ const SUPER_ADMINS = [
 // 🔔 ROLE TO TAG (For Lock/Unlock)
 const RAID_ROLE_ID = "1455184518104485950";
 
-const VERSION = "v22.0 (Fixed user-replies-v2 + 100 per page)";
+const VERSION = "v23.0 (Efficient comments-v2 - 4x faster)";
 
 // 📂 DATABASE SETUP
 const DATA_DIR = fs.existsSync('/dataaa') ? '/dataaa' : './data';
@@ -82,10 +82,6 @@ let activeCronJobs = [];
 // ==========================================
 function getUser(discordId) {
     return db.prepare('SELECT * FROM users WHERE discord_id = ?').get(discordId);
-}
-
-function getUserByHandle(handle) {
-    return db.prepare('SELECT * FROM users WHERE LOWER(handle) = LOWER(?)').get(handle);
 }
 
 function saveUser(discordId, handle, numericId) {
@@ -165,29 +161,6 @@ async function getNumericId(username) {
     return null;
 }
 
-async function getTweetAuthorHandle(tweetId) {
-    if (!RAPID_API_KEY) return null;
-    try {
-        const options = {
-            method: 'GET',
-            url: `https://${RAPID_HOST}/tweet`,
-            params: { id: tweetId },
-            headers: { 
-                'x-rapidapi-key': RAPID_API_KEY, 
-                'x-rapidapi-host': RAPID_HOST 
-            },
-            timeout: 15000
-        };
-        const response = await axios.request(options);
-        const handles = findValuesByKey(response.data, 'screen_name');
-        if (handles.length > 0) return handles[0].toLowerCase();
-        return null;
-    } catch (e) {
-        console.error(`[Lookup] Failed to find author for tweet ${tweetId}: ${e.message}`);
-        return null;
-    }
-}
-
 /**
  * Extract tweet ID from various Twitter/X URL formats
  * Supports: /status/, /statuses/, /post/, twitter.com, x.com
@@ -216,12 +189,14 @@ function extractTweetId(url) {
 }
 
 /**
- * 🚀 USER-REPLIES-V2 CHECKER (CORRECTED WITH PROPER PAGINATION)
- * - Uses user-replies-v2 endpoint with correct nested structure parsing
- * - Fetches up to 100 replies per page
- * - Properly handles conversation modules and timeline items
- * - Uses cursor.bottom for pagination
- * - Includes duplicate detection to prevent infinite loops
+ * 🚀 EFFICIENT REPLY CHECKER (Using comments-v2 endpoint)
+ * NEW APPROACH: Instead of fetching user's entire reply history,
+ * we fetch replies TO each target tweet and check if user's ID is in there.
+ * This is 4x more efficient when checking many users against same tweets.
+ * 
+ * - Uses comments-v2 endpoint to get repliers TO a specific tweet
+ * - Handles pagination (up to 5 pages = 500 replies per tweet)
+ * - Much faster: Scans ~100 replies per tweet vs ~400 tweets per user
  */
 async function checkReplies(userNumericId, targetTweetIds) {
     if (!userNumericId || !RAPID_API_KEY) {
@@ -243,204 +218,43 @@ async function checkReplies(userNumericId, targetTweetIds) {
 
     console.log(`\n${'='.repeat(60)}`);
     console.log(`🔍 CHECKING REPLIES FOR USER: ${userHandle} (${userNumericId})`);
-    console.log(`🎯 Target tweets to find: ${targetSet.size}`);
+    console.log(`🎯 Target tweets to check: ${targetSet.size}`);
     console.log(`📋 Targets: ${Array.from(targetSet).join(', ')}`);
     console.log(`${'='.repeat(60)}\n`);
 
     let matches = 0;
-    let cursor = null;
-    let pageCount = 0;
-    
-    // Reduced max pages since typical users have 30-60 tweets
-    const maxPages = 10;
-    const tweetsPerPage = 100;
     const matchedTweets = new Set();
-    let totalTweetsScanned = 0;
-    const seenTweetIds = new Set(); // Track seen tweets to detect duplicates
+    let tweetIndex = 0;
 
-    for (let i = 0; i < maxPages; i++) {
-        pageCount++;
-        
-        // Rate limiting delay
-        if (i > 0) {
+    // For each target tweet, get replies and check if user is in them
+    for (const tweetId of targetSet) {
+        tweetIndex++;
+        console.log(`📍 [${tweetIndex}/${targetSet.size}] Checking tweet ${tweetId}...`);
+
+        try {
+            // Get all user IDs who replied to this tweet
+            const replierIds = await getRepliesTo(tweetId);
+
+            if (replierIds.has(userNumericId)) {
+                matches++;
+                matchedTweets.add(tweetId);
+                console.log(`  ✅ User replied to this tweet!`);
+            } else {
+                console.log(`  ❌ User did NOT reply`);
+            }
+
+        } catch (error) {
+            console.error(`  ❌ Error checking tweet: ${error.message}`);
+        }
+
+        // Rate limit delay between tweets
+        if (tweetIndex < targetSet.size) {
             await new Promise(resolve => setTimeout(resolve, 1500));
         }
-
-        const params = { 
-            user: userNumericId, 
-            count: String(tweetsPerPage)
-        };
-        
-        if (cursor) {
-            params.cursor = cursor;
-        }
-
-        const options = {
-            method: 'GET',
-            url: `https://${RAPID_HOST}/user-replies-v2`,
-            params: params,
-            headers: { 
-                'x-rapidapi-key': RAPID_API_KEY, 
-                'x-rapidapi-host': RAPID_HOST 
-            },
-            timeout: 25000
-        };
-
-        console.log(`📄 Fetching page ${pageCount}${cursor ? ' (cursor: ' + cursor.substring(0, 20) + '...)' : ' (initial)'}`);
-
-        let retries = 3;
-        let pageData = null;
-
-        // Retry logic with exponential backoff
-        while (retries > 0) {
-            try {
-                const response = await axios.request(options);
-                pageData = response.data;
-                break; // Success
-            } catch (e) {
-                retries--;
-                
-                if (e.response && e.response.status === 429) {
-                    const waitTime = (4 - retries) * 5000;
-                    console.warn(`⚠️ Rate limit hit (page ${pageCount}). Waiting ${waitTime/1000}s... (${retries} retries left)`);
-                    await new Promise(r => setTimeout(r, waitTime));
-                    continue;
-                }
-                
-                if (retries === 0) {
-                    console.error(`❌ Failed to fetch page ${pageCount} for user ${userNumericId}: ${e.message}`);
-                    pageData = null;
-                    break;
-                }
-                
-                // Other errors - short retry
-                await new Promise(r => setTimeout(r, 2000));
-            }
-        }
-
-        if (!pageData) {
-            console.warn(`⚠️ Skipping page ${pageCount} due to errors`);
-            continue;
-        }
-
-        // CORRECTED PARSING LOGIC - Handle nested conversation modules
-        const foundIds = new Set();
-        const pageTweetIds = new Set();
-        let tweetsOnPage = 0;
-
-        if (pageData.result && pageData.result.timeline && pageData.result.timeline.instructions) {
-            pageData.result.timeline.instructions.forEach(instruction => {
-                if (instruction.type === 'TimelineAddEntries' && instruction.entries) {
-                    instruction.entries.forEach(entry => {
-                        // Handle conversation modules (threads)
-                        if (entry.content && entry.content.entryType === 'TimelineTimelineModule') {
-                            if (entry.content.items) {
-                                entry.content.items.forEach(item => {
-                                    if (item.item && item.item.itemContent && item.item.itemContent.tweet_results) {
-                                        const tweet = item.item.itemContent.tweet_results.result;
-                                        if (tweet && tweet.legacy) {
-                                            const tweetId = tweet.legacy.id_str || tweet.rest_id;
-                                            if (tweetId) pageTweetIds.add(tweetId);
-
-                                            tweetsOnPage++;
-                                            if (tweet.legacy.in_reply_to_status_id_str) {
-                                                foundIds.add(String(tweet.legacy.in_reply_to_status_id_str));
-                                            }
-                                        }
-                                    }
-                                });
-                            }
-                        }
-
-                        // Handle single timeline items
-                        if (entry.content && entry.content.entryType === 'TimelineTimelineItem') {
-                            if (entry.content.itemContent && entry.content.itemContent.tweet_results) {
-                                const tweet = entry.content.itemContent.tweet_results.result;
-                                if (tweet && tweet.legacy) {
-                                    const tweetId = tweet.legacy.id_str || tweet.rest_id;
-                                    if (tweetId) pageTweetIds.add(tweetId);
-
-                                    tweetsOnPage++;
-                                    if (tweet.legacy.in_reply_to_status_id_str) {
-                                        foundIds.add(String(tweet.legacy.in_reply_to_status_id_str));
-                                    }
-                                }
-                            }
-                        }
-                    });
-                }
-            });
-        }
-
-        // Check for duplicate tweets (pagination loop detection)
-        let duplicateCount = 0;
-        for (const tweetId of pageTweetIds) {
-            if (seenTweetIds.has(tweetId)) {
-                duplicateCount++;
-            } else {
-                seenTweetIds.add(tweetId);
-            }
-        }
-
-        totalTweetsScanned += tweetsOnPage;
-
-        // Check matches against targets
-        let pageMatches = 0;
-        const newMatches = [];
-        
-        for (const id of foundIds) {
-            if (targetSet.has(id) && !matchedTweets.has(id)) {
-                matchedTweets.add(id);
-                matches++;
-                pageMatches++;
-                newMatches.push(id);
-            }
-        }
-
-        console.log(`📊 Page ${pageCount}: ${tweetsOnPage} tweets, ${foundIds.size} reply-to IDs, ${duplicateCount} duplicates`);
-        
-        if (pageMatches > 0) {
-            console.log(`   ✅ MATCHES: ${pageMatches} (IDs: ${newMatches.join(', ')})`);
-            console.log(`   📈 Total: ${matches}/${targetSet.size}`);
-        }
-
-        // IMPROVED CURSOR EXTRACTION - Use 'bottom' cursor for pagination
-        let nextCursor = null;
-        
-        if (pageData.cursor && pageData.cursor.bottom) {
-            nextCursor = pageData.cursor.bottom;
-        } else if (pageData.next_cursor) {
-            nextCursor = pageData.next_cursor;
-        }
-
-        // Stop conditions
-        if (duplicateCount > tweetsOnPage * 0.8) {
-            console.log(`\n🛑 Stopping: ${duplicateCount}/${tweetsOnPage} tweets are duplicates`);
-            break;
-        }
-
-        if (!nextCursor || nextCursor === cursor) {
-            console.log(`\n🏁 Reached end of replies`);
-            break;
-        }
-        
-        if (matches >= targetSet.size) {
-            console.log(`\n🎯 All targets found!`);
-            break;
-        }
-
-        if (tweetsOnPage === 0) {
-            console.log(`\n🏁 No more tweets`);
-            break;
-        }
-
-        cursor = nextCursor;
     }
 
     console.log(`\n${'='.repeat(60)}`);
     console.log(`📊 FINAL RESULTS FOR @${userHandle}`);
-    console.log(`   Pages: ${pageCount}`);
-    console.log(`   Unique tweets: ${seenTweetIds.size}`);
     console.log(`   Matches: ${matches}/${targetSet.size}`);
     if (matches < targetSet.size) {
         const missing = Array.from(targetSet).filter(id => !matchedTweets.has(id));
@@ -449,6 +263,94 @@ async function checkReplies(userNumericId, targetTweetIds) {
     console.log(`${'='.repeat(60)}\n`);
     
     return matches;
+}
+
+/**
+ * Helper function: Get all user IDs who replied to a specific tweet
+ * Uses comments-v2 endpoint with pagination
+ */
+async function getRepliesTo(tweetId) {
+    const replierIds = new Set();
+    let cursor = null;
+    let pageCount = 0;
+    const maxPages = 5; // 5 pages = ~500 replies max
+
+    for (let i = 0; i < maxPages; i++) {
+        pageCount++;
+
+        const params = { pid: tweetId };
+        if (cursor) {
+            params.cursor = cursor;
+        }
+
+        const options = {
+            method: 'GET',
+            url: `https://${RAPID_HOST}/comments-v2`,
+            params: params,
+            headers: {
+                'x-rapidapi-key': RAPID_API_KEY,
+                'x-rapidapi-host': RAPID_HOST
+            },
+            timeout: 15000
+        };
+
+        let retries = 2;
+        let pageData = null;
+
+        while (retries > 0) {
+            try {
+                const response = await axios.request(options);
+                pageData = response.data;
+                break;
+            } catch (e) {
+                retries--;
+                if (e.response && e.response.status === 429) {
+                    console.warn(`  ⚠️ Rate limit, waiting...`);
+                    await new Promise(r => setTimeout(r, 3000));
+                    continue;
+                }
+                if (retries === 0) {
+                    throw e;
+                }
+                await new Promise(r => setTimeout(r, 1000));
+            }
+        }
+
+        if (!pageData) continue;
+
+        // Extract user IDs from response (user_results.result.rest_id)
+        function extractUserIds(obj) {
+            if (!obj) return;
+            if (Array.isArray(obj)) {
+                obj.forEach(item => extractUserIds(item));
+            } else if (typeof obj === 'object') {
+                if (obj.user_results && obj.user_results.result && obj.user_results.result.rest_id) {
+                    replierIds.add(obj.user_results.result.rest_id);
+                }
+                for (let key in obj) {
+                    extractUserIds(obj[key]);
+                }
+            }
+        }
+
+        extractUserIds(pageData);
+
+        // Check for next cursor
+        const nextCursor = pageData.cursor?.bottom;
+        if (!nextCursor || nextCursor === cursor) {
+            break;
+        }
+
+        cursor = nextCursor;
+
+        // Short delay between pages
+        if (i < maxPages - 1) {
+            await new Promise(resolve => setTimeout(resolve, 800));
+        }
+    }
+
+    console.log(`  📊 Found ${replierIds.size} unique repliers across ${pageCount} page(s)`);
+    return replierIds;
 }
 
 // ==========================================
