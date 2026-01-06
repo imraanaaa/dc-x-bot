@@ -18,13 +18,13 @@ const fs = require('fs');
 const path = require('path');
 
 // ==========================================
-// ⚙️ CONFIGURATION
+// CONFIGURATION
 // ==========================================
 const TOKEN = process.env.DISCORD_TOKEN; 
 const RAPID_API_KEY = process.env.RAPID_API_KEY; 
 const RAPID_HOST = "twitter241.p.rapidapi.com";
 
-// 👑 ADMIN LIST
+// ADMIN LIST
 const SUPER_ADMINS = [
     "1442310589362999428", // Admin 1
     "1442618881285034099", // Admin 2
@@ -32,12 +32,12 @@ const SUPER_ADMINS = [
     "986489740045987880"   // Developer (imraanaaa)
 ];
 
-// 🔔 ROLE TO TAG (For Lock/Unlock)
+// ROLE TO TAG (For Lock/Unlock)
 const RAID_ROLE_ID = "1455184518104485950";
 
-const VERSION = "v22.0 (Fixed user-replies-v2 + 100 per page)";
+const VERSION = "v22.0";
 
-// 📂 DATABASE SETUP
+// DATABASE SETUP
 const DATA_DIR = fs.existsSync('/dataaa') ? '/dataaa' : './data';
 if (!fs.existsSync(DATA_DIR)) fs.mkdirSync(DATA_DIR, { recursive: true });
 
@@ -62,7 +62,7 @@ db.exec(`
 `);
 
 // ==========================================
-// 🤖 BOT SETUP
+// BOT SETUP
 // ==========================================
 const client = new Client({
     intents: [
@@ -78,7 +78,7 @@ const client = new Client({
 let activeCronJobs = []; 
 
 // ==========================================
-// 💾 DATABASE HELPERS
+// DATABASE HELPERS
 // ==========================================
 function getUser(discordId) {
     return db.prepare('SELECT * FROM users WHERE discord_id = ?').get(discordId);
@@ -119,8 +119,10 @@ function isSessionOpen() {
 }
 
 // ==========================================
-// 📡 API ENGINE (V2 with Deep Scanning)
+// API ENGINE
 // ==========================================
+
+const MAX_TWEETS_PER_API_CALL = 100;
 function findValuesByKey(obj, key, list = []) {
     if (!obj) return list;
     if (Array.isArray(obj)) {
@@ -136,7 +138,7 @@ function findValuesByKey(obj, key, list = []) {
 
 async function getNumericId(username) {
     if (!RAPID_API_KEY) {
-        console.error("❌ CRITICAL: RAPID_API_KEY missing!");
+        console.error("CRITICAL: RAPID_API_KEY missing!");
         return null;
     }
     
@@ -160,7 +162,7 @@ async function getNumericId(username) {
             if (!isNaN(id) && id.length > 5) return id; 
         }
     } catch (e) { 
-        console.error(`❌ API ID Error for ${username}: ${e.message}`); 
+        console.error(`API ID Error for ${username}: ${e.message}`); 
     }
     return null;
 }
@@ -215,12 +217,7 @@ function extractTweetId(url) {
     return null;
 }
 
-/**
- * 🚀 USER-REPLIES-V2 CHECKER (FIXED)
- * - Uses user-replies-v2 endpoint with correct structure parsing
- * - Fetches up to 100 replies per page
- * - Properly counts tweets and matches reply IDs
- */
+
 async function checkReplies(userNumericId, targetTweetIds) {
     if (!userNumericId || !RAPID_API_KEY) {
         console.warn(`⚠️ Missing userNumericId or API key`);
@@ -240,34 +237,37 @@ async function checkReplies(userNumericId, targetTweetIds) {
     const userHandle = userRecord.handle.toLowerCase();
 
     console.log(`\n${'='.repeat(60)}`);
-    console.log(`🔍 CHECKING REPLIES FOR USER: ${userHandle} (${userNumericId})`);
-    console.log(`🎯 Target tweets to find: ${targetSet.size}`);
-    console.log(`📋 Targets: ${Array.from(targetSet).join(', ')}`);
+    console.log(`CHECKING REPLIES FOR USER: ${userHandle} (${userNumericId})`);
+    console.log(`Target tweets to find: ${targetSet.size}`);
+    console.log(`Targets: ${Array.from(targetSet).join(', ')}`);
     console.log(`${'='.repeat(60)}\n`);
 
     let matches = 0;
     let cursor = null;
     let pageCount = 0;
-    
-    // Scan up to 30 pages with 100 tweets each = 3000 tweets depth
-    const maxPages = 30;
-    const tweetsPerPage = 100;
+
+
+    const tweetsPerPage = Math.min(MAX_TWEETS_PER_API_CALL, 100);
     const matchedTweets = new Set();
     let totalTweetsScanned = 0;
 
-    for (let i = 0; i < maxPages; i++) {
+    // Loop indefinitely until we find all targets or run out of data
+    while (true) {
         pageCount++;
-        
-        // Rate limiting delay
-        if (i > 0) {
+
+        // Rate limiting delay (skip on first page)
+        if (pageCount > 1) {
             await new Promise(resolve => setTimeout(resolve, 1500));
         }
 
-        const params = { 
-            user: userNumericId, 
-            count: String(tweetsPerPage)
+        // Ensure count never exceeds API limit (defensive programming)
+        const safeCount = Math.min(tweetsPerPage, 100);
+
+        const params = {
+            user: userNumericId,
+            count: String(safeCount)
         };
-        
+
         if (cursor) {
             params.cursor = cursor;
         }
@@ -283,7 +283,7 @@ async function checkReplies(userNumericId, targetTweetIds) {
             timeout: 25000
         };
 
-        console.log(`📄 Fetching page ${pageCount}${cursor ? ' (with cursor)' : ' (initial)'}`);
+        console.log(`Fetching page ${pageCount}${cursor ? ' (with cursor)' : ' (initial)'}`);
 
         let retries = 3;
         let pageData = null;
@@ -299,13 +299,13 @@ async function checkReplies(userNumericId, targetTweetIds) {
                 
                 if (e.response && e.response.status === 429) {
                     const waitTime = (4 - retries) * 5000;
-                    console.warn(`⚠️ Rate limit hit (page ${pageCount}). Waiting ${waitTime/1000}s... (${retries} retries left)`);
+                    console.warn(`Rate limit hit (page ${pageCount}). Waiting ${waitTime/1000}s... (${retries} retries left)`);
                     await new Promise(r => setTimeout(r, waitTime));
                     continue;
                 }
                 
                 if (retries === 0) {
-                    console.error(`❌ Failed to fetch page ${pageCount} for user ${userNumericId}: ${e.message}`);
+                    console.error(`Failed to fetch page ${pageCount} for user ${userNumericId}: ${e.message}`);
                     pageData = null;
                     break;
                 }
@@ -316,27 +316,37 @@ async function checkReplies(userNumericId, targetTweetIds) {
         }
 
         if (!pageData) {
-            console.warn(`⚠️ Skipping page ${pageCount} due to errors`);
+            console.warn(`Skipping page ${pageCount} due to errors`);
             continue;
         }
 
         // Parse the response properly
         const foundIds = new Set();
         let tweetsOnPage = 0;
+        let oldestTweetDate = null;
+        let newestTweetDate = null;
 
         // user-replies-v2 returns data in: response.data (array of tweet objects)
         if (pageData.data && Array.isArray(pageData.data)) {
             tweetsOnPage = pageData.data.length;
-            
+
             pageData.data.forEach(item => {
                 // The structure could be: item.tweet.legacy or item.legacy or item directly
                 const tweet = item.tweet || item;
-                
+
+                // Track tweet age for debugging
+                const createdAt = tweet.legacy?.created_at || tweet.created_at;
+                if (createdAt) {
+                    const tweetDate = new Date(createdAt);
+                    if (!oldestTweetDate || tweetDate < oldestTweetDate) oldestTweetDate = tweetDate;
+                    if (!newestTweetDate || tweetDate > newestTweetDate) newestTweetDate = tweetDate;
+                }
+
                 // Check for in_reply_to_status_id_str in legacy
                 if (tweet.legacy && tweet.legacy.in_reply_to_status_id_str) {
                     foundIds.add(String(tweet.legacy.in_reply_to_status_id_str));
                 }
-                
+
                 // Check direct fields
                 if (tweet.in_reply_to_status_id_str) {
                     foundIds.add(String(tweet.in_reply_to_status_id_str));
@@ -368,13 +378,19 @@ async function checkReplies(userNumericId, targetTweetIds) {
             }
         }
 
-        console.log(`📊 Page ${pageCount}: Scanned ${tweetsOnPage} tweets, found ${foundIds.size} reply-to IDs`);
-        
+        // Calculate tweet age for this page
+        const now = new Date();
+        const ageInfo = oldestTweetDate
+            ? `oldest: ${Math.floor((now - oldestTweetDate) / (1000 * 60 * 60))}h ago`
+            : 'no date info';
+
+        console.log(`Page ${pageCount}: ${tweetsOnPage} tweets, ${foundIds.size} reply-to IDs (${ageInfo})`);
+
         if (pageMatches > 0) {
-            console.log(`   ✅ MATCHES on this page: ${pageMatches} (IDs: ${newMatches.join(', ')})`);
-            console.log(`   📈 Total matches so far: ${matches}/${targetSet.size}`);
+            console.log(`MATCHES on this page: ${pageMatches} (IDs: ${newMatches.join(', ')})`);
+            console.log(`Total matches so far: ${matches}/${targetSet.size}`);
         } else {
-            console.log(`   ⚪ No new matches on this page`);
+            console.log(`No new matches on this page`);
         }
 
         // Extract cursor for next page
@@ -400,12 +416,24 @@ async function checkReplies(userNumericId, targetTweetIds) {
 
         // Stop conditions
         if (!nextCursor || nextCursor === cursor) {
-            console.log(`\n🏁 Reached end of replies at page ${pageCount}`);
+            console.log(`\nSCAN COMPLETE - Reached end of user's ENTIRE reply history`);
+            console.log(`Total pages scanned: ${pageCount}`);
+            console.log(`Total tweets scanned: ${totalTweetsScanned}`);
+            console.log(`API returned no more data (no cursor available)`);
             break;
         }
-        
+
         if (matches >= targetSet.size) {
-            console.log(`\n🎯 All targets found! Stopping scan early.`);
+            console.log(`\nAll ${targetSet.size} targets found! Stopping scan (optimization).`);
+            console.log(`Scanned ${pageCount} pages to find all matches.`);
+            break;
+        }
+
+        // Safety limit to prevent infinite loops (very generous limit)
+        if (pageCount >= 500) {
+            console.log(`\nSAFETY LIMIT - Reached 500 pages (50,000 tweets scanned)`);
+            console.log(`This is likely an API issue or infinite cursor loop.`);
+            console.log(`Matches found: ${matches}/${targetSet.size}`);
             break;
         }
 
@@ -413,14 +441,14 @@ async function checkReplies(userNumericId, targetTweetIds) {
     }
 
     console.log(`\n${'='.repeat(60)}`);
-    console.log(`📊 FINAL SCAN RESULTS FOR USER @${userHandle} (${userNumericId})`);
-    console.log(`   Pages scanned: ${pageCount}`);
-    console.log(`   Total tweets scanned: ${totalTweetsScanned}`);
-    console.log(`   Matches found: ${matches}/${targetSet.size}`);
-    console.log(`   Success rate: ${Math.floor((matches / targetSet.size) * 100)}%`);
+    console.log(`FINAL SCAN RESULTS FOR USER @${userHandle} (${userNumericId})`);
+    console.log(`Pages scanned: ${pageCount}`);
+    console.log(`Total tweets scanned: ${totalTweetsScanned}`);
+    console.log(`Matches found: ${matches}/${targetSet.size}`);
+    console.log(`Success rate: ${Math.floor((matches / targetSet.size) * 100)}%`);
     if (matches < targetSet.size) {
         const missing = Array.from(targetSet).filter(id => !matchedTweets.has(id));
-        console.log(`   ❌ Missing replies to: ${missing.join(', ')}`);
+        console.log(`Missing replies to: ${missing.join(', ')}`);
     }
     console.log(`${'='.repeat(60)}\n`);
     
@@ -938,6 +966,7 @@ client.once('ready', () => {
     console.log(`✅ Logged in as ${client.user.tag}`);
     console.log(`🤖 Version: ${VERSION}`);
     console.log(`📊 Database: ${dbPath}`);
+    console.log(`⚠️  API Limit: ${MAX_TWEETS_PER_API_CALL} tweets/request (DO NOT EXCEED)`);
     rescheduleCrons();
 });
 
