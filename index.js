@@ -18,13 +18,13 @@ const fs = require('fs');
 const path = require('path');
 
 // ==========================================
-// CONFIGURATION
+// ⚙️ CONFIGURATION
 // ==========================================
 const TOKEN = process.env.DISCORD_TOKEN; 
 const RAPID_API_KEY = process.env.RAPID_API_KEY; 
 const RAPID_HOST = "twitter241.p.rapidapi.com";
 
-// ADMIN LIST
+// 👑 ADMIN LIST
 const SUPER_ADMINS = [
     "1442310589362999428", // Admin 1
     "1442618881285034099", // Admin 2
@@ -32,12 +32,12 @@ const SUPER_ADMINS = [
     "986489740045987880"   // Developer (imraanaaa)
 ];
 
-// ROLE TO TAG (For Lock/Unlock)
+// 🔔 ROLE TO TAG (For Lock/Unlock)
 const RAID_ROLE_ID = "1455184518104485950";
 
-const VERSION = "v22.0";
+const VERSION = "v22.0 (Fixed user-replies-v2 + 100 per page)";
 
-// DATABASE SETUP
+// 📂 DATABASE SETUP
 const DATA_DIR = fs.existsSync('/dataaa') ? '/dataaa' : './data';
 if (!fs.existsSync(DATA_DIR)) fs.mkdirSync(DATA_DIR, { recursive: true });
 
@@ -62,7 +62,7 @@ db.exec(`
 `);
 
 // ==========================================
-// BOT SETUP
+// 🤖 BOT SETUP
 // ==========================================
 const client = new Client({
     intents: [
@@ -78,7 +78,7 @@ const client = new Client({
 let activeCronJobs = []; 
 
 // ==========================================
-// DATABASE HELPERS
+// 💾 DATABASE HELPERS
 // ==========================================
 function getUser(discordId) {
     return db.prepare('SELECT * FROM users WHERE discord_id = ?').get(discordId);
@@ -119,10 +119,8 @@ function isSessionOpen() {
 }
 
 // ==========================================
-// API ENGINE
+// 📡 API ENGINE (V2 with Deep Scanning)
 // ==========================================
-
-const MAX_TWEETS_PER_API_CALL = 100;
 function findValuesByKey(obj, key, list = []) {
     if (!obj) return list;
     if (Array.isArray(obj)) {
@@ -138,7 +136,7 @@ function findValuesByKey(obj, key, list = []) {
 
 async function getNumericId(username) {
     if (!RAPID_API_KEY) {
-        console.error("CRITICAL: RAPID_API_KEY missing!");
+        console.error("❌ CRITICAL: RAPID_API_KEY missing!");
         return null;
     }
     
@@ -162,7 +160,7 @@ async function getNumericId(username) {
             if (!isNaN(id) && id.length > 5) return id; 
         }
     } catch (e) { 
-        console.error(`API ID Error for ${username}: ${e.message}`); 
+        console.error(`❌ API ID Error for ${username}: ${e.message}`); 
     }
     return null;
 }
@@ -217,7 +215,14 @@ function extractTweetId(url) {
     return null;
 }
 
-
+/**
+ * 🚀 USER-REPLIES-V2 CHECKER (CORRECTED WITH PROPER PAGINATION)
+ * - Uses user-replies-v2 endpoint with correct nested structure parsing
+ * - Fetches up to 100 replies per page
+ * - Properly handles conversation modules and timeline items
+ * - Uses cursor.bottom for pagination
+ * - Includes duplicate detection to prevent infinite loops
+ */
 async function checkReplies(userNumericId, targetTweetIds) {
     if (!userNumericId || !RAPID_API_KEY) {
         console.warn(`⚠️ Missing userNumericId or API key`);
@@ -237,37 +242,35 @@ async function checkReplies(userNumericId, targetTweetIds) {
     const userHandle = userRecord.handle.toLowerCase();
 
     console.log(`\n${'='.repeat(60)}`);
-    console.log(`CHECKING REPLIES FOR USER: ${userHandle} (${userNumericId})`);
-    console.log(`Target tweets to find: ${targetSet.size}`);
-    console.log(`Targets: ${Array.from(targetSet).join(', ')}`);
+    console.log(`🔍 CHECKING REPLIES FOR USER: ${userHandle} (${userNumericId})`);
+    console.log(`🎯 Target tweets to find: ${targetSet.size}`);
+    console.log(`📋 Targets: ${Array.from(targetSet).join(', ')}`);
     console.log(`${'='.repeat(60)}\n`);
 
     let matches = 0;
     let cursor = null;
     let pageCount = 0;
-
-
-    const tweetsPerPage = Math.min(MAX_TWEETS_PER_API_CALL, 100);
+    
+    // Reduced max pages since typical users have 30-60 tweets
+    const maxPages = 10;
+    const tweetsPerPage = 100;
     const matchedTweets = new Set();
     let totalTweetsScanned = 0;
+    const seenTweetIds = new Set(); // Track seen tweets to detect duplicates
 
-    // Loop indefinitely until we find all targets or run out of data
-    while (true) {
+    for (let i = 0; i < maxPages; i++) {
         pageCount++;
-
-        // Rate limiting delay (skip on first page)
-        if (pageCount > 1) {
+        
+        // Rate limiting delay
+        if (i > 0) {
             await new Promise(resolve => setTimeout(resolve, 1500));
         }
 
-        // Ensure count never exceeds API limit (defensive programming)
-        const safeCount = Math.min(tweetsPerPage, 100);
-
-        const params = {
-            user: userNumericId,
-            count: String(safeCount)
+        const params = { 
+            user: userNumericId, 
+            count: String(tweetsPerPage)
         };
-
+        
         if (cursor) {
             params.cursor = cursor;
         }
@@ -283,7 +286,7 @@ async function checkReplies(userNumericId, targetTweetIds) {
             timeout: 25000
         };
 
-        console.log(`Fetching page ${pageCount}${cursor ? ' (with cursor)' : ' (initial)'}`);
+        console.log(`📄 Fetching page ${pageCount}${cursor ? ' (cursor: ' + cursor.substring(0, 20) + '...)' : ' (initial)'}`);
 
         let retries = 3;
         let pageData = null;
@@ -299,13 +302,13 @@ async function checkReplies(userNumericId, targetTweetIds) {
                 
                 if (e.response && e.response.status === 429) {
                     const waitTime = (4 - retries) * 5000;
-                    console.warn(`Rate limit hit (page ${pageCount}). Waiting ${waitTime/1000}s... (${retries} retries left)`);
+                    console.warn(`⚠️ Rate limit hit (page ${pageCount}). Waiting ${waitTime/1000}s... (${retries} retries left)`);
                     await new Promise(r => setTimeout(r, waitTime));
                     continue;
                 }
                 
                 if (retries === 0) {
-                    console.error(`Failed to fetch page ${pageCount} for user ${userNumericId}: ${e.message}`);
+                    console.error(`❌ Failed to fetch page ${pageCount} for user ${userNumericId}: ${e.message}`);
                     pageData = null;
                     break;
                 }
@@ -316,52 +319,68 @@ async function checkReplies(userNumericId, targetTweetIds) {
         }
 
         if (!pageData) {
-            console.warn(`Skipping page ${pageCount} due to errors`);
+            console.warn(`⚠️ Skipping page ${pageCount} due to errors`);
             continue;
         }
 
-        // Parse the response properly
+        // CORRECTED PARSING LOGIC - Handle nested conversation modules
         const foundIds = new Set();
+        const pageTweetIds = new Set();
         let tweetsOnPage = 0;
-        let oldestTweetDate = null;
-        let newestTweetDate = null;
 
-        // user-replies-v2 returns data in: response.data (array of tweet objects)
-        if (pageData.data && Array.isArray(pageData.data)) {
-            tweetsOnPage = pageData.data.length;
+        if (pageData.result && pageData.result.timeline && pageData.result.timeline.instructions) {
+            pageData.result.timeline.instructions.forEach(instruction => {
+                if (instruction.type === 'TimelineAddEntries' && instruction.entries) {
+                    instruction.entries.forEach(entry => {
+                        // Handle conversation modules (threads)
+                        if (entry.content && entry.content.entryType === 'TimelineTimelineModule') {
+                            if (entry.content.items) {
+                                entry.content.items.forEach(item => {
+                                    if (item.item && item.item.itemContent && item.item.itemContent.tweet_results) {
+                                        const tweet = item.item.itemContent.tweet_results.result;
+                                        if (tweet && tweet.legacy) {
+                                            const tweetId = tweet.legacy.id_str || tweet.rest_id;
+                                            if (tweetId) pageTweetIds.add(tweetId);
 
-            pageData.data.forEach(item => {
-                // The structure could be: item.tweet.legacy or item.legacy or item directly
-                const tweet = item.tweet || item;
+                                            tweetsOnPage++;
+                                            if (tweet.legacy.in_reply_to_status_id_str) {
+                                                foundIds.add(String(tweet.legacy.in_reply_to_status_id_str));
+                                            }
+                                        }
+                                    }
+                                });
+                            }
+                        }
 
-                // Track tweet age for debugging
-                const createdAt = tweet.legacy?.created_at || tweet.created_at;
-                if (createdAt) {
-                    const tweetDate = new Date(createdAt);
-                    if (!oldestTweetDate || tweetDate < oldestTweetDate) oldestTweetDate = tweetDate;
-                    if (!newestTweetDate || tweetDate > newestTweetDate) newestTweetDate = tweetDate;
-                }
+                        // Handle single timeline items
+                        if (entry.content && entry.content.entryType === 'TimelineTimelineItem') {
+                            if (entry.content.itemContent && entry.content.itemContent.tweet_results) {
+                                const tweet = entry.content.itemContent.tweet_results.result;
+                                if (tweet && tweet.legacy) {
+                                    const tweetId = tweet.legacy.id_str || tweet.rest_id;
+                                    if (tweetId) pageTweetIds.add(tweetId);
 
-                // Check for in_reply_to_status_id_str in legacy
-                if (tweet.legacy && tweet.legacy.in_reply_to_status_id_str) {
-                    foundIds.add(String(tweet.legacy.in_reply_to_status_id_str));
-                }
-
-                // Check direct fields
-                if (tweet.in_reply_to_status_id_str) {
-                    foundIds.add(String(tweet.in_reply_to_status_id_str));
-                }
-                if (tweet.in_reply_to_status_id) {
-                    foundIds.add(String(tweet.in_reply_to_status_id));
+                                    tweetsOnPage++;
+                                    if (tweet.legacy.in_reply_to_status_id_str) {
+                                        foundIds.add(String(tweet.legacy.in_reply_to_status_id_str));
+                                    }
+                                }
+                            }
+                        }
+                    });
                 }
             });
         }
 
-        // Also use deep search as backup
-        const deepReplyIds = findValuesByKey(pageData, 'in_reply_to_status_id_str');
-        deepReplyIds.forEach(id => {
-            if (id && id.length > 5) foundIds.add(String(id));
-        });
+        // Check for duplicate tweets (pagination loop detection)
+        let duplicateCount = 0;
+        for (const tweetId of pageTweetIds) {
+            if (seenTweetIds.has(tweetId)) {
+                duplicateCount++;
+            } else {
+                seenTweetIds.add(tweetId);
+            }
+        }
 
         totalTweetsScanned += tweetsOnPage;
 
@@ -378,62 +397,40 @@ async function checkReplies(userNumericId, targetTweetIds) {
             }
         }
 
-        // Calculate tweet age for this page
-        const now = new Date();
-        const ageInfo = oldestTweetDate
-            ? `oldest: ${Math.floor((now - oldestTweetDate) / (1000 * 60 * 60))}h ago`
-            : 'no date info';
-
-        console.log(`Page ${pageCount}: ${tweetsOnPage} tweets, ${foundIds.size} reply-to IDs (${ageInfo})`);
-
+        console.log(`📊 Page ${pageCount}: ${tweetsOnPage} tweets, ${foundIds.size} reply-to IDs, ${duplicateCount} duplicates`);
+        
         if (pageMatches > 0) {
-            console.log(`MATCHES on this page: ${pageMatches} (IDs: ${newMatches.join(', ')})`);
-            console.log(`Total matches so far: ${matches}/${targetSet.size}`);
-        } else {
-            console.log(`No new matches on this page`);
+            console.log(`   ✅ MATCHES: ${pageMatches} (IDs: ${newMatches.join(', ')})`);
+            console.log(`   📈 Total: ${matches}/${targetSet.size}`);
         }
 
-        // Extract cursor for next page
+        // IMPROVED CURSOR EXTRACTION - Use 'bottom' cursor for pagination
         let nextCursor = null;
         
-        if (pageData.next_cursor) {
+        if (pageData.cursor && pageData.cursor.bottom) {
+            nextCursor = pageData.cursor.bottom;
+        } else if (pageData.next_cursor) {
             nextCursor = pageData.next_cursor;
-        } else if (pageData.cursor) {
-            nextCursor = pageData.cursor;
-        } else {
-            const cursors = findValuesByKey(pageData, 'value');
-            const nextCursors = findValuesByKey(pageData, 'next_cursor');
-            
-            if (nextCursors.length > 0) {
-                nextCursor = nextCursors[nextCursors.length - 1];
-            } else if (cursors.length > 0) {
-                const validCursors = cursors.filter(c => typeof c === 'string' && c.length > 10);
-                if (validCursors.length > 0) {
-                    nextCursor = validCursors[validCursors.length - 1];
-                }
-            }
         }
 
         // Stop conditions
+        if (duplicateCount > tweetsOnPage * 0.8) {
+            console.log(`\n🛑 Stopping: ${duplicateCount}/${tweetsOnPage} tweets are duplicates`);
+            break;
+        }
+
         if (!nextCursor || nextCursor === cursor) {
-            console.log(`\nSCAN COMPLETE - Reached end of user's ENTIRE reply history`);
-            console.log(`Total pages scanned: ${pageCount}`);
-            console.log(`Total tweets scanned: ${totalTweetsScanned}`);
-            console.log(`API returned no more data (no cursor available)`);
+            console.log(`\n🏁 Reached end of replies`);
             break;
         }
-
+        
         if (matches >= targetSet.size) {
-            console.log(`\nAll ${targetSet.size} targets found! Stopping scan (optimization).`);
-            console.log(`Scanned ${pageCount} pages to find all matches.`);
+            console.log(`\n🎯 All targets found!`);
             break;
         }
 
-        // Safety limit to prevent infinite loops (very generous limit)
-        if (pageCount >= 500) {
-            console.log(`\nSAFETY LIMIT - Reached 500 pages (50,000 tweets scanned)`);
-            console.log(`This is likely an API issue or infinite cursor loop.`);
-            console.log(`Matches found: ${matches}/${targetSet.size}`);
+        if (tweetsOnPage === 0) {
+            console.log(`\n🏁 No more tweets`);
             break;
         }
 
@@ -441,14 +438,13 @@ async function checkReplies(userNumericId, targetTweetIds) {
     }
 
     console.log(`\n${'='.repeat(60)}`);
-    console.log(`FINAL SCAN RESULTS FOR USER @${userHandle} (${userNumericId})`);
-    console.log(`Pages scanned: ${pageCount}`);
-    console.log(`Total tweets scanned: ${totalTweetsScanned}`);
-    console.log(`Matches found: ${matches}/${targetSet.size}`);
-    console.log(`Success rate: ${Math.floor((matches / targetSet.size) * 100)}%`);
+    console.log(`📊 FINAL RESULTS FOR @${userHandle}`);
+    console.log(`   Pages: ${pageCount}`);
+    console.log(`   Unique tweets: ${seenTweetIds.size}`);
+    console.log(`   Matches: ${matches}/${targetSet.size}`);
     if (matches < targetSet.size) {
         const missing = Array.from(targetSet).filter(id => !matchedTweets.has(id));
-        console.log(`Missing replies to: ${missing.join(', ')}`);
+        console.log(`   ❌ Missing: ${missing.join(', ')}`);
     }
     console.log(`${'='.repeat(60)}\n`);
     
@@ -966,7 +962,6 @@ client.once('ready', () => {
     console.log(`✅ Logged in as ${client.user.tag}`);
     console.log(`🤖 Version: ${VERSION}`);
     console.log(`📊 Database: ${dbPath}`);
-    console.log(`⚠️  API Limit: ${MAX_TWEETS_PER_API_CALL} tweets/request (DO NOT EXCEED)`);
     rescheduleCrons();
 });
 
